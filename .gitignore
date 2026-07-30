@@ -1,0 +1,4 @@
+# Runtime state never belongs in the repo — it is per-machine and per-session.
+*.log
+state/
+.DS_Store

@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# tailbell-doctor — check every link in the chain and name the one that is broken.
+#
+# Runs on either side and checks whichever side it is on:
+#   agent host   : are the hooks registered? tools present? is the log growing?
+#                  and above all, what did the last decisions say?
+#   workstation  : is the listener alive? is an SSH master up? can it render?
+#
+# Usage: tailbell-doctor [--test]     --test also emits a real notification.
+set -u
+
+TEST=0; [ "${1:-}" = "--test" ] && TEST=1
+TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
+[ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
+TRANSPORT="${TAILBELL_TRANSPORT:-file}"
+LOGFILE="${TAILBELL_LOG:-$TAILBELL_HOME/events.log}"
+DEBUG="${TAILBELL_DEBUG_LOG:-$TAILBELL_HOME/debug.log}"
+STATE_DIR="${TAILBELL_STATE_DIR:-$TAILBELL_HOME/state}"
+SELFDIR="$(cd "$(dirname "$0")" && pwd)"
+
+ok=0; bad=0; warn=0
+pass() { printf '  ✅ %s\n' "$*"; ok=$((ok+1)); }
+fail() { printf '  ❌ %s\n' "$*"; bad=$((bad+1)); }
+note() { printf '  ⚠️  %s\n' "$*"; warn=$((warn+1)); }
+sect() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+printf '\033[1mtailbell doctor\033[0m   (%s, %s)\n' "$(uname)" "$(hostname -s 2>/dev/null)"
+
+sect "配置"
+if [ -f "$TAILBELL_HOME/config" ]; then pass "config 存在 (transport=$TRANSPORT)"
+else note "没有 $TAILBELL_HOME/config,全部走默认值 (transport=$TRANSPORT)"; fi
+
+if [ "$(uname)" = "Darwin" ]; then
+#################################################### workstation ##############
+  sect "显示层"
+  for f in tailbell-show tailbell-listen; do
+    if [ -x "$SELFDIR/$f" ]; then pass "$f 可执行"; else fail "$SELFDIR/$f 缺失或不可执行"; fi
+  done
+  [ -x /usr/bin/python3 ] && pass "/usr/bin/python3 存在" \
+    || fail "/usr/bin/python3 缺失 —— 装 Xcode Command Line Tools: xcode-select --install"
+  if pgrep -x Hammerspoon >/dev/null 2>&1; then pass "Hammerspoon 在跑 (居中弹窗可用)"
+  else note "Hammerspoon 没跑 —— 走右上角横幅,这是 v0 的保底路径,正常"; fi
+  command -v alerter >/dev/null 2>&1 && pass "alerter 可用" \
+    || note "alerter 没装 —— 退到 osascript(注意它需要给 Script Editor 授权通知)"
+
+  sect "监听层"
+  if launchctl list 2>/dev/null | grep -q 'tailbell'; then pass "LaunchAgent 已加载"
+  else fail "LaunchAgent 没加载 —— 跑 mac/install.sh"; fi
+  if pgrep -f 'tailbell-listen' >/dev/null 2>&1; then pass "监听进程在跑"
+  else fail "tailbell-listen 没在跑 —— 看 /tmp/tailbell.err"; fi
+
+  sect "SSH 通道 (远程事件全靠它)"
+  anym=0
+  for h in $(printf '%s' "${TAILBELL_HOSTS:-gl6,greatlakes}" | tr ',' ' '); do
+    if ssh -O check "$h" >/dev/null 2>&1; then pass "$h 有活着的 master (免认证复用)"; anym=1
+    else note "$h 没有 master"; fi
+  done
+  [ "$anym" = 0 ] && fail "一个 master 都没有 —— 跑 'ssh <host> true' 建一条 (最常见故障)"
+
+  if [ -s /tmp/tailbell.err ]; then
+    note "监听器有错误输出,最后 5 行:"; tail -5 /tmp/tailbell.err | sed 's/^/       /'
+  else pass "监听器无错误输出"; fi
+
+  if [ "$TEST" = 1 ]; then
+    sect "实测"
+    "$SELFDIR/tailbell-show" "🩺 tailbell 自查" "看到这条说明显示层正常" urgent "" \
+      && pass "已触发 —— 现在看屏幕"
+  fi
+
+else
+#################################################### agent host ###############
+  sect "hooks 是否注册"
+  # Resolve the interpreter first. A bare `python3` would pick up whatever
+  # virtualenv is active, which on this cluster is a per-project .venv.
+  PY=/usr/bin/python3
+  [ -x "$PY" ] || PY="$(command -v python3 || echo python3)"
+  "$PY" - <<'PYEOF'
+import json, pathlib
+want = {"Stop": None, "UserPromptSubmit": None, "SessionEnd": None,
+        "Notification": None, "PreToolUse": "AskUserQuestion"}
+found = {k: False for k in want}
+for p in [pathlib.Path.home()/".claude"/"settings.json",
+          pathlib.Path.home()/".claude"/"settings.local.json"]:
+    if not p.exists():
+        continue
+    try:
+        hooks = json.loads(p.read_text()).get("hooks", {})
+    except Exception:
+        continue
+    for ev, matcher in want.items():
+        for e in hooks.get(ev) or []:
+            cmds = " ".join(x.get("command", "") for x in e.get("hooks", []))
+            if "tailbell-notify" not in cmds:
+                continue
+            if matcher and e.get("matcher") != matcher:
+                continue
+            found[ev] = True
+for ev, matcher in want.items():
+    label = ev + ((" (matcher=%s)" % matcher) if matcher else "")
+    print(("  ✅ " + label) if found[ev]
+          else ("  ❌ %s 没指向 tailbell-notify —— 该事件不会通知你" % label))
+PYEOF
+
+  sect "依赖工具"
+  for t in jq flock hostname stat tee date; do
+    command -v "$t" >/dev/null 2>&1 && pass "$t" || fail "$t 缺失 —— hook 会静默失败"
+  done
+
+  sect "事件日志"
+  if [ -f "$LOGFILE" ]; then
+    n=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+    pass "events.log: $n 行,最后写入 $(stat -c %y "$LOGFILE" 2>/dev/null | cut -d. -f1)"
+    [ "$n" -gt 0 ] && tail -3 "$LOGFILE" | /usr/bin/python3 -c '
+import sys, json
+for l in sys.stdin:
+    l = l.strip()
+    if not l: continue
+    try: r = json.loads(l)
+    except ValueError: continue
+    print("       %s | %s" % (r.get("title"), r.get("message")))'
+  else note "events.log 还不存在 (从未发出过事件)"; fi
+
+  sect "决策日志 —— 「为什么没通知我」的答案在这里"
+  if [ -f "$DEBUG" ]; then
+    pass "debug.log 最近 12 行:"
+    tail -12 "$DEBUG" | sed 's/^/       /'
+    s=$(grep -c 'skipped:' "$DEBUG" 2>/dev/null); s=${s:-0}
+    a=$(grep -cE 'ABORT|FAILED' "$DEBUG" 2>/dev/null); a=${a:-0}
+    [ "$s" -gt 0 ] && note "有 $s 次因回合过短被跳过 (阈值 ${TAILBELL_MIN_SECONDS:-60}s)"
+    [ "$a" -gt 0 ] && fail "有 $a 次 ABORT/FAILED —— 原因见上面日志"
+  else note "debug.log 不存在 —— hook 一次都没被调用过"; fi
+
+  sect "会话计时状态"
+  c=$(ls -1 "$STATE_DIR"/*.start 2>/dev/null | wc -l)
+  echo "     $c 个会话正在计时"
+
+  if [ "$TEST" = 1 ]; then
+    sect "实测 (伪造一个跑了 10 分钟的会话)"
+    sid="doctor00-0000-0000-0000-000000000000"
+    before=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+    mkdir -p "$STATE_DIR"; echo $(( $(date +%s) - 600 )) > "$STATE_DIR/$sid.start"
+    printf '{"session_id":"%s","cwd":"%s"}' "$sid" "$PWD" \
+      | "$SELFDIR/tailbell-notify" Stop
+    after=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+    if [ "$after" -gt "$before" ]; then
+      pass "写入成功: $(tail -1 "$LOGFILE")"
+      echo "     → 若工作站上没弹窗,问题在那一侧,去那边再跑一次本脚本"
+    else fail "没写进去 —— 看上面的决策日志"; fi
+    rm -f "$STATE_DIR/$sid.start"
+  fi
+fi
+
+sect "结论"
+printf '  %d 项正常, %d 项警告, %d 项失败\n' "$ok" "$warn" "$bad"
+if   [ "$bad" -gt 0 ]; then echo "  → 先修 ❌"
+elif [ "$warn" -gt 0 ]; then echo "  → 无硬故障;⚠️ 可能就是你没收到通知的原因"
+else echo "  → 这一侧全绿。两侧都跑一遍才能定位问题在哪一端。"; fi
+[ "$TEST" = 0 ] && echo "  (加 --test 会真发一条做端到端验证)"
+exit 0

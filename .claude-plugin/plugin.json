@@ -1,0 +1,22 @@
+{
+  "name": "tailbell",
+  "displayName": "tailbell",
+  "version": "0.1.0",
+  "description": "Desktop notifications when Claude Code finishes or needs you — including over SSH on an HPC cluster, with no third-party service.",
+  "author": {
+    "name": "Tianlang (Jackie) Chen",
+    "email": "272573266+jackiectl@users.noreply.github.com",
+    "url": "https://github.com/jackiectl"
+  },
+  "repository": "https://github.com/jackiectl/tailbell",
+  "license": "MIT",
+  "keywords": [
+    "notifications",
+    "hooks",
+    "remote-ssh",
+    "hpc",
+    "slurm",
+    "vscode",
+    "macos"
+  ]
+}

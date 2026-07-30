@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# tailbell — decide whether this Claude Code event deserves your attention, and
+# emit it. Runs as a hook on whatever machine Claude Code itself runs on.
+#
+# Called as: tailbell-notify <EVENT>   with the hook JSON on stdin.
+#
+# ---------------------------------------------------------------------------
+# Which events we listen to, and why these
+#
+# In the VS Code extension's chat panel the `Notification` and `PermissionRequest`
+# hooks never fire — measured on extension 2.1.220: 0 fires each, against 787 for
+# PreToolUse in the same session (upstream anthropics/claude-code #80530, #31285,
+# #13203; root cause #80110 — the extension passes --permission-prompt-tool stdio,
+# which bypasses the event). They DO fire in the terminal CLI.
+#
+# So the signal is built from events that fire everywhere:
+#   UserPromptSubmit            -> remember when this turn started
+#   Stop                        -> the turn finished
+#   PreToolUse:AskUserQuestion  -> Claude is about to block on a question
+# plus, for the terminal CLI where it works, `Notification` gives us the
+# permission-prompt case the chat panel cannot report.
+#
+# ---------------------------------------------------------------------------
+# Transport (TAILBELL_TRANSPORT)
+#
+#   file  - append a JSON line to $TAILBELL_LOG. A listener on the workstation
+#           tails it over the SSH connection the editor already holds open. No
+#           network call, no third-party service, no quota. On a cluster whose
+#           $HOME is shared NFS this also works from compute nodes, and one
+#           listener covers every login node.
+#   ntfy  - POST to an ntfy server. Reaches you when no SSH session is up, at the
+#           cost of a third party seeing project names.
+#
+# On macOS neither applies: Claude Code is already on the user's screen, so the
+# notification is raised locally.
+#
+# ---------------------------------------------------------------------------
+# Privacy: only the project directory name, the host name and an event label are
+# ever emitted. The Stop payload contains `last_assistant_message` — the entire
+# reply text — and it is deliberately never read.
+set -u
+
+EVENT="${1:-?}"
+
+TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
+[ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
+
+TRANSPORT="${TAILBELL_TRANSPORT:-file}"
+LOGFILE="${TAILBELL_LOG:-$TAILBELL_HOME/events.log}"
+DEBUG="${TAILBELL_DEBUG_LOG:-$TAILBELL_HOME/debug.log}"
+STATE_DIR="${TAILBELL_STATE_DIR:-$TAILBELL_HOME/state}"
+# Turns shorter than this mean you are almost certainly still watching the screen.
+MIN_SECS="${TAILBELL_MIN_SECONDS:-60}"
+NTFY_TOPIC="${TAILBELL_NTFY_TOPIC:-}"
+NTFY_SERVER="${TAILBELL_NTFY_SERVER:-https://ntfy.sh}"
+NTFY_TOKEN="${TAILBELL_NTFY_TOKEN:-}"
+
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+# Every path through this script ends in `exit 0`, because a hook must never
+# break the session. That makes silent failure the default, which is precisely
+# what made a dropped notification impossible to diagnose — so every decision is
+# recorded here instead.
+dbg() {
+  printf '%s  %-18s %s\n' "$(date '+%m-%d %H:%M:%S')" "$EVENT" "$*" >> "$DEBUG" 2>/dev/null
+  if [ "$(stat -c %s "$DEBUG" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    tail -n 400 "$DEBUG" > "$DEBUG.tmp" 2>/dev/null && mv "$DEBUG.tmp" "$DEBUG"
+  fi
+}
+
+payload="$(cat)"
+
+if ! command -v jq >/dev/null 2>&1; then
+  dbg "ABORT: jq not on PATH"
+  exit 0
+fi
+get() { printf '%s' "$payload" | jq -r "$1 // empty" 2>/dev/null; }
+
+sid="$(get .session_id)"
+if [ -z "$sid" ]; then
+  dbg "ABORT: payload has no session_id"
+  exit 0
+fi
+
+cwd="$(get .cwd)"
+proj="${cwd##*/}"; [ -n "$proj" ] || proj="claude"
+short="${sid:0:4}"
+startf="$STATE_DIR/$sid.start"
+# All login nodes share one $HOME, so a single listener sees every node's events;
+# without the host name, windows on different nodes are indistinguishable.
+node="$(hostname -s 2>/dev/null || echo '?')"
+
+emit() { # emit <title> <message> <tags> <priority>
+  if [ "$(uname)" = "Darwin" ]; then
+    local urgent=""; [ "$4" = "high" ] && urgent="urgent"
+    local show="$TAILBELL_HOME/bin/tailbell-show"
+    [ -x "$show" ] || show="$(dirname "$0")/tailbell-show"
+    if [ -x "$show" ]; then
+      # $proj is passed separately from the title so the display layer can match
+      # it against editor window titles and focus the right window on click.
+      "$show" "$1" "$2" "$urgent" "$proj"
+      dbg "SHOWN locally: $1"
+    else
+      /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
+      dbg "SHOWN via osascript: $1"
+    fi
+    return
+  fi
+
+  case "$TRANSPORT" in
+    file)
+      # jq builds the line so a quote or newline in a project name cannot produce
+      # malformed JSON; flock stops concurrent sessions from interleaving writes.
+      if jq -nc --arg t "$1" --arg m "$2" --arg p "$4" --arg j "$proj" --arg n "$node" \
+           '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n}' \
+          | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1; then
+        dbg "EMITTED to $LOGFILE: $1"
+      else
+        dbg "FAILED writing $LOGFILE"
+      fi
+      if [ "$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+        tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE"
+      fi
+      ;;
+    ntfy)
+      if [ -z "$NTFY_TOPIC" ]; then dbg "ABORT: transport=ntfy but no topic configured"; return; fi
+      local auth=()
+      [ -n "$NTFY_TOKEN" ] && auth=(-H "Authorization: Bearer $NTFY_TOKEN")
+      # Compute nodes have no direct route out, but ARC presets http_proxy and
+      # curl honours it, so the same call works from inside a batch job.
+      if curl -sS -m 8 "${auth[@]}" -H "Title: $1" -H "Tags: $3" -H "Priority: $4" \
+              -d "$2" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null 2>&1; then
+        dbg "EMITTED to ntfy: $1"
+      else
+        dbg "FAILED posting to ntfy"
+      fi
+      ;;
+    *)
+      dbg "ABORT: unknown transport '$TRANSPORT'"
+      ;;
+  esac
+}
+
+case "$EVENT" in
+  UserPromptSubmit)
+    date +%s > "$startf"
+    dbg "turn started ($proj #$short on $node)"
+    ;;
+
+  AskUserQuestion)
+    # Claude is about to block on a multiple-choice question. Always worth a ping
+    # regardless of elapsed time: this is the expensive dead-time case.
+    emit "❓ $proj · 在等你回答" "Claude Code 有问题要问你 · $node (#$short)" "question" "high"
+    ;;
+
+  Notification)
+    # Fires in the terminal CLI but never in the VS Code chat panel. Kept because
+    # it is the only source for the permission-prompt case, which the panel
+    # simply cannot report.
+    ntype="$(get .notification_type)"
+    case "$ntype" in
+      permission_prompt)
+        emit "🔑 $proj · 需要你授权" "Claude Code 在等一个权限决定 · $node (#$short)" "key" "high" ;;
+      idle_prompt)
+        emit "💤 $proj · 在等你输入" "Claude Code 空闲等待 · $node (#$short)" "zzz" "default" ;;
+      *)
+        dbg "ignored notification_type='$ntype'" ;;
+    esac
+    ;;
+
+  Stop)
+    if [ -f "$startf" ]; then
+      elapsed=$(( $(date +%s) - $(cat "$startf" 2>/dev/null || echo 0) ))
+      rm -f "$startf"
+    else
+      # No start marker: the turn began before the hook was installed, or the
+      # session was resumed, or SessionEnd cleared it. Treating that as 0 seconds
+      # silently swallowed the notification — the opposite of what an unknown
+      # duration should do. Notify, and label the duration honestly.
+      elapsed=-1
+      dbg "no start marker for #$short — duration unknown, notifying anyway"
+    fi
+    if [ "$elapsed" -ge 0 ] && [ "$elapsed" -lt "$MIN_SECS" ]; then
+      dbg "skipped: turn was ${elapsed}s < ${MIN_SECS}s ($proj #$short)"
+      exit 0
+    fi
+    if   [ "$elapsed" -lt 0 ];    then human="时长未知"
+    elif [ "$elapsed" -ge 3600 ]; then human="跑了 $((elapsed/3600))h$((elapsed%3600/60))m"
+    elif [ "$elapsed" -ge 60 ];   then human="跑了 $((elapsed/60))m$((elapsed%60))s"
+    else                               human="跑了 ${elapsed}s"; fi
+    emit "✅ $proj · 完成" "$human · $node (#$short)" "white_check_mark" "default"
+    ;;
+
+  SessionEnd)
+    rm -f "$startf"
+    dbg "session ended ($proj #$short)"
+    ;;
+
+  *)
+    dbg "ignored unknown event"
+    ;;
+esac
+exit 0

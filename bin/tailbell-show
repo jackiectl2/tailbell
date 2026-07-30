@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# tailbell display layer (macOS). Runs on the workstation and is the single place
+# that decides HOW an alert is drawn. Called by tailbell-listen for events that
+# arrived from a remote host, and directly by tailbell-notify when Claude Code is
+# running locally.
+#
+# Usage: tailbell-show <title> <message> [urgent] [project]
+#
+# Renderers, in order. The guarantee of this version is the last one: osascript
+# ships with macOS, so the zero-dependency path always exists. The two above it
+# are opportunistic upgrades used only if you already have them — v0 does not
+# install or require either.
+#
+#   1. Hammerspoon  — centered, clickable overlay. Driven through its URL scheme,
+#                     NOT the `hs` CLI: that tool cannot detect a running
+#                     Hammerspoon on 1.1.1 (upstream #3847) and hardcodes
+#                     /usr/local, the wrong prefix on Apple Silicon (#3088).
+#   2. alerter      — a maintained top-right banner with a reliable click target.
+#   3. osascript    — always present. Note it presents as "Script Editor", which
+#                     must be allowed in System Settings › Notifications, or the
+#                     notification is dropped silently with exit status 0.
+#
+# `project` is the project directory name, kept separate from the title so a
+# renderer can match it against editor window titles and focus the right window.
+set -u
+
+title="${1:-Claude Code}"
+message="${2:-}"
+urgent="${3:-}"
+project="${4:-}"
+
+# Never a bare `python3`: on a machine with an activated virtualenv that resolves
+# to whichever interpreter the current project happens to use.
+PY=/usr/bin/python3
+
+renderer="${TAILBELL_RENDERER:-auto}"
+
+if [ "$renderer" = "auto" ] || [ "$renderer" = "hammerspoon" ]; then
+  if pgrep -x Hammerspoon >/dev/null 2>&1; then
+    # `open` reports success whether or not the app handled the URL, so the pgrep
+    # above is what actually decides; check first, then fire.
+    q() { "$PY" -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+    u=0; [ -n "$urgent" ] && u=1
+    # -g keeps Hammerspoon in the background so the alert never steals focus.
+    if open -g "hammerspoon://ccnotify?title=$(q "$title")&message=$(q "$message")&urgent=$u&project=$(q "$project")" >/dev/null 2>&1; then
+      exit 0
+    fi
+  fi
+fi
+
+if [ "$renderer" = "auto" ] || [ "$renderer" = "alerter" ]; then
+  if command -v alerter >/dev/null 2>&1; then
+    alerter -title "$title" -message "$message" -sound Glass -group "$title" \
+      >/dev/null 2>&1 && exit 0
+  fi
+fi
+
+# json.dumps produces a literal that is also valid in AppleScript, so quotes,
+# backslashes and CJK text all survive being embedded in the script text.
+lit() { "$PY" -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$1"; }
+/usr/bin/osascript -e \
+  "display notification $(lit "$message") with title $(lit "$title") sound name \"Glass\"" \
+  >/dev/null 2>&1
+exit 0
