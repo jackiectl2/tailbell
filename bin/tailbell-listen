@@ -63,10 +63,11 @@ def pick_host():
     return (HOSTS[0] if HOSTS else "gl6"), False
 
 
-def show(title, message, urgent=False, project=""):
+def show(title, message, urgent=False, project="", app="", entrypoint=""):
     """Hand off to tailbell-show, which owns how the alert is drawn."""
     if os.access(SHOW, os.X_OK):
-        argv = [SHOW, title, message, "urgent" if urgent else "", project or ""]
+        argv = [SHOW, title, message, "urgent" if urgent else "",
+                project or "", app or "", entrypoint or ""]
     else:
         argv = ["/usr/bin/osascript", "-e",
                 'display notification %s with title %s sound name "Glass"'
@@ -94,7 +95,9 @@ def stream(host):
         show(rec.get("title") or "Claude Code",
              rec.get("message") or "",
              urgent=(rec.get("priority") == "high"),
-             project=rec.get("project") or "")
+             project=rec.get("project") or "",
+             app=rec.get("app") or "",
+             entrypoint=rec.get("entrypoint") or "")
     proc.wait()
 
 

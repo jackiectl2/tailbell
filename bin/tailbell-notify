@@ -90,6 +90,36 @@ startf="$STATE_DIR/$sid.start"
 # without the host name, windows on different nodes are indistinguishable.
 node="$(hostname -s 2>/dev/null || echo '?')"
 
+# Which frontend is Claude Code running under. Two signals, because neither alone
+# covers every case:
+#   entrypoint — set by Claude Code (e.g. claude-vscode). Survives SSH, so it is
+#                the only hint a remote session can offer, but names a kind of
+#                frontend rather than a specific app.
+#   app        — bundle id of the GUI application owning this hook, found by
+#                walking up the process tree. Exact, but only meaningful when the
+#                hook runs on the machine with the screen.
+# Together they let a click focus the right window whether Claude Code runs in an
+# editor, the desktop app, or a terminal.
+entrypoint="${CLAUDE_CODE_ENTRYPOINT:-}"
+
+owning_app() {
+  [ "$(uname)" = "Darwin" ] || return 0
+  local pid=$$ exe bundle
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$pid" ] || return 0
+    [ "$pid" -gt 1 ] 2>/dev/null || return 0
+    exe="$(ps -o comm= -p "$pid" 2>/dev/null)"   # macOS gives the full path here
+    case "$exe" in
+      */*.app/Contents/MacOS/*)
+        bundle="${exe%%.app/Contents/MacOS/*}.app"
+        /usr/bin/defaults read "$bundle/Contents/Info" CFBundleIdentifier 2>/dev/null
+        return 0 ;;
+    esac
+  done
+}
+app="$(owning_app)"
+
 emit() { # emit <title> <message> <tags> <priority>
   if [ "$(uname)" = "Darwin" ]; then
     local urgent=""; [ "$4" = "high" ] && urgent="urgent"
@@ -98,7 +128,7 @@ emit() { # emit <title> <message> <tags> <priority>
     if [ -x "$show" ]; then
       # $proj is passed separately from the title so the display layer can match
       # it against editor window titles and focus the right window on click.
-      "$show" "$1" "$2" "$urgent" "$proj"
+      "$show" "$1" "$2" "$urgent" "$proj" "$app" "$entrypoint"
       dbg "SHOWN locally: $1"
     else
       /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
@@ -112,7 +142,9 @@ emit() { # emit <title> <message> <tags> <priority>
       # jq builds the line so a quote or newline in a project name cannot produce
       # malformed JSON; flock stops concurrent sessions from interleaving writes.
       if jq -nc --arg t "$1" --arg m "$2" --arg p "$4" --arg j "$proj" --arg n "$node" \
-           '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n}' \
+                --arg a "$app" --arg e "$entrypoint" \
+           '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n,
+             app:$a, entrypoint:$e}' \
           | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1; then
         dbg "EMITTED to $LOGFILE: $1"
       else
@@ -189,6 +221,20 @@ case "$EVENT" in
     elif [ "$elapsed" -ge 60 ];   then human="跑了 $((elapsed/60))m$((elapsed%60))s"
     else                               human="跑了 ${elapsed}s"; fi
     emit "✅ $proj · 完成" "$human · $node (#$short)" "white_check_mark" "default"
+    ;;
+
+  StopFailure)
+    # The turn died on an API error rather than finishing. Always notify: the
+    # elapsed-time gate exists to avoid interrupting you over a quick success,
+    # and a failure is never a quick success.
+    rm -f "$startf"
+    emit "⚠️ $proj · 中断" "这一轮因错误结束 · $node (#$short)" "warning" "high"
+    ;;
+
+  Elicitation)
+    # An MCP server is asking for input mid-tool-call: blocked on you, so worth a
+    # ping however long the turn has run.
+    emit "❓ $proj · 工具在等你输入" "MCP 请求输入 · $node (#$short)" "question" "high"
     ;;
 
   SessionEnd)

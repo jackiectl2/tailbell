@@ -75,6 +75,15 @@ b=$(lines); fire Notification \
   "{\"session_id\":\"$s\",\"cwd\":\"/x/p\",\"notification_type\":\"auth_success\"}"
 check "无关的 notification_type 被忽略" "$(( $(lines) - b ))" "0"
 
+# A turn that died on an API error is never a "quick success", so the elapsed-time
+# gate must not apply to it.
+s=$(sid jjjj); echo $(( $(date +%s) - 5 )) > "$TAILBELL_STATE_DIR/$s.start"
+b=$(lines); fire StopFailure "{\"session_id\":\"$s\",\"cwd\":\"/x/p\"}"
+check "StopFailure 无视时长门槛" "$(( $(lines) - b ))" "1"
+
+b=$(lines); fire Elicitation "{\"session_id\":\"$(sid kkkk)\",\"cwd\":\"/x/p\"}"
+check "Elicitation 会通知" "$(( $(lines) - b ))" "1"
+
 ########################################################################
 echo
 echo "── 隐私 ──"
@@ -95,7 +104,8 @@ while IFS= read -r l; do
   printf '%s' "$l" | /usr/bin/python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-for k in ("ts", "title", "message", "priority", "project", "node"):
+for k in ("ts", "title", "message", "priority", "project", "node",
+          "app", "entrypoint"):
     assert k in d, k
 ' 2>/dev/null || bad=$((bad+1))
 done < "$TAILBELL_LOG"
@@ -108,6 +118,23 @@ if tail -1 "$TAILBELL_LOG" | /usr/bin/python3 -c 'import sys,json;json.load(sys.
 then ok "含引号的项目名仍产出合法 JSON"; else no "含引号的项目名破坏了 JSON"; fi
 
 ########################################################################
+echo
+echo "── 前端识别 (点击跳转要用) ──"
+
+# entrypoint travels over SSH and is the only frontend hint a remote session has.
+s=$(sid llll); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
+CLAUDE_CODE_ENTRYPOINT=claude-vscode fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/p\"}"
+check "entrypoint 写进事件" \
+  "$(tail -1 "$TAILBELL_LOG" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin)["entrypoint"])')" \
+  "claude-vscode"
+
+# owning_app() must be a silent no-op off macOS, not an error.
+s=$(sid mmmm); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
+fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/p\"}"
+check "非 macOS 上 app 为空且不报错" \
+  "$(tail -1 "$TAILBELL_LOG" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin)["app"])')" \
+  ""
+
 echo
 echo "── 健壮性 ──"
 
