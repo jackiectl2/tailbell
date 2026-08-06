@@ -19,6 +19,9 @@ STATE_DIR="${TAILBELL_STATE_DIR:-$TAILBELL_HOME/state}"
 SELFDIR="$(cd "$(dirname "$0")" && pwd)"
 
 ok=0; bad=0; warn=0
+# Counting a file that may not exist yet. Guard before redirecting, so a missing
+# file is 0 rather than a shell error nobody asked for.
+count_lines() { [ -f "$1" ] && wc -l < "$1" | tr -d ' ' || echo 0; }
 pass() { printf '  ✅ %s\n' "$*"; ok=$((ok+1)); }
 fail() { printf '  ❌ %s\n' "$*"; bad=$((bad+1)); }
 note() { printf '  ⚠️  %s\n' "$*"; warn=$((warn+1)); }
@@ -50,12 +53,23 @@ if [ "$(uname)" = "Darwin" ]; then
   else fail "tailbell-listen 没在跑 —— 看 /tmp/tailbell.err"; fi
 
   sect "SSH 通道 (远程事件全靠它)"
+  # Discover exactly the way the listener does, from the ControlMaster sockets, so
+  # this check cannot disagree with what the listener will actually watch. A
+  # hardcoded list here used to say "gl6 没有 master" while the listener was
+  # happily streaming from gl-login3.
   anym=0
-  for h in $(printf '%s' "${TAILBELL_HOSTS:-gl6,greatlakes}" | tr ',' ' '); do
-    if ssh -O check "$h" >/dev/null 2>&1; then pass "$h 有活着的 master (免认证复用)"; anym=1
-    else note "$h 没有 master"; fi
+  for sock in "$HOME"/.ssh/cm-*; do
+    [ -S "$sock" ] || [ -e "$sock" ] || continue
+    base="${sock##*/}"; rest="${base#cm-}"; hostport="${rest#*@}"
+    h="${hostport%-*}"
+    [ -n "$h" ] || continue
+    if ssh -O check "$h" >/dev/null 2>&1; then
+      pass "$h 有活着的 master (免认证复用)"; anym=1
+    else
+      note "$h 的 socket 还在但连接已断 (陈旧,可忽略)"
+    fi
   done
-  [ "$anym" = 0 ] && fail "一个 master 都没有 —— 跑 'ssh <host> true' 建一条 (最常见故障)"
+  [ "$anym" = 0 ] && fail "一个 master 都没有 —— 跑 'ssh <集群别名> true' 建一条 (最常见故障)"
 
   if [ -s /tmp/tailbell.err ]; then
     note "监听器有错误输出,最后 5 行:"; tail -5 /tmp/tailbell.err | sed 's/^/       /'
@@ -77,7 +91,8 @@ else
   "$PY" - <<'PYEOF'
 import json, pathlib
 want = {"Stop": None, "UserPromptSubmit": None, "SessionEnd": None,
-        "Notification": None, "PreToolUse": "AskUserQuestion"}
+        "Notification": None, "StopFailure": None, "Elicitation": None,
+        "PreToolUse": "AskUserQuestion"}
 found = {k: False for k in want}
 for p in [pathlib.Path.home()/".claude"/"settings.json",
           pathlib.Path.home()/".claude"/"settings.local.json"]:
@@ -108,7 +123,7 @@ PYEOF
 
   sect "事件日志"
   if [ -f "$LOGFILE" ]; then
-    n=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+    n=$(count_lines "$LOGFILE")
     pass "events.log: $n 行,最后写入 $(stat -c %y "$LOGFILE" 2>/dev/null | cut -d. -f1)"
     [ "$n" -gt 0 ] && tail -3 "$LOGFILE" | /usr/bin/python3 -c '
 import sys, json
@@ -137,11 +152,15 @@ for l in sys.stdin:
   if [ "$TEST" = 1 ]; then
     sect "实测 (伪造一个跑了 10 分钟的会话)"
     sid="doctor00-0000-0000-0000-000000000000"
-    before=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+    # `wc -l < missing` fails as a *shell* redirection, and the shell prints that
+    # error on its own stderr — which `2>/dev/null` inside the command does not
+    # cover. On a first run that made a perfectly good test print
+    # "No such file or directory" immediately above "写入成功".
+    before=$(count_lines "$LOGFILE")
     mkdir -p "$STATE_DIR"; echo $(( $(date +%s) - 600 )) > "$STATE_DIR/$sid.start"
     printf '{"session_id":"%s","cwd":"%s"}' "$sid" "$PWD" \
       | "$SELFDIR/tailbell-notify" Stop
-    after=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+    after=$(count_lines "$LOGFILE")
     if [ "$after" -gt "$before" ]; then
       pass "写入成功: $(tail -1 "$LOGFILE")"
       echo "     → 若工作站上没弹窗,问题在那一侧,去那边再跑一次本脚本"
