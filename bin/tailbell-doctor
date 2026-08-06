@@ -61,7 +61,11 @@ if [ "$(uname)" = "Darwin" ]; then
   for sock in "$HOME"/.ssh/cm-*; do
     [ -S "$sock" ] || [ -e "$sock" ] || continue
     base="${sock##*/}"; rest="${base#cm-}"; hostport="${rest#*@}"
-    h="${hostport%-*}"
+    # The port separator depends on how ControlPath was written: %h-%p gives
+    # host-22, %h:%p gives host:22. Stripping only on a hyphen turned
+    # armis2.arc-ts.umich.edu:22 into armis2.arc — strip a trailing port
+    # regardless of which separator produced it.
+    h="$(printf '%s' "$hostport" | sed -E 's/[:-][0-9]+$//')"
     [ -n "$h" ] || continue
     if ssh -O check "$h" >/dev/null 2>&1; then
       pass "$h 有活着的 master (免认证复用)"; anym=1

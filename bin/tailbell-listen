@@ -57,7 +57,36 @@ SSH_OPTS = [
     "-o", "ServerAliveCountMax=3",
 ]
 
-_socket_re = re.compile(r"^cm-(?P<user>[^@]+)@(?P<host>.+)-(?P<port>\d+)$")
+# The port separator is NOT fixed. `ControlPath ...cm-%r@%h-%p` yields
+# cm-user@host-22, but a config written with %h:%p yields cm-user@host:22 — and
+# assuming the hyphen matched nothing at all, so the listener silently watched no
+# hosts while every other check reported green. Accept either, and tolerate a
+# path with no port at all.
+_socket_re = re.compile(r"^cm-[^@]+@(?P<host>.+?)(?:[:-](?P<port>\d+))?$")
+
+
+def hosts_from_ssh_config():
+    """Host aliases from ~/.ssh/config, as a fallback.
+
+    A ControlPath built from %C hashes the whole tuple, so the host is simply not
+    recoverable from the filename. Aliases give us candidates to probe; only ones
+    with a live master are actually used, so listing extras costs nothing.
+    """
+    out = set()
+    try:
+        with open(os.path.join(SSH_DIR, "config")) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].lower() == "host":
+                    for alias in parts[1:]:
+                        if "*" not in alias and "?" not in alias:
+                            out.add(alias)
+    except OSError:
+        pass
+    return out
 
 
 def discover_hosts():
@@ -69,14 +98,12 @@ def discover_hosts():
         names = []
     for name in names:
         m = _socket_re.match(name)
-        if not m:
-            continue
-        host = m.group("host")
-        if ONLY and not re.search(ONLY, host):
-            continue
-        found.add(host)
-    for h in EXTRA:
-        found.add(h)
+        if m:
+            found.add(m.group("host"))
+    found |= hosts_from_ssh_config()
+    found |= set(EXTRA)
+    if ONLY:
+        found = {h for h in found if re.search(ONLY, h)}
     return found
 
 
@@ -87,6 +114,27 @@ def master_alive(host):
         return r.returncode == 0
     except Exception:
         return False
+
+
+# Two masters to the same cluster — say `greatlakes` and `gl-login6` — tail the
+# same file, because that cluster's login nodes share one NFS $HOME. Without this
+# every event would be announced once per connection.
+_seen = {}
+_seen_lock = threading.Lock()
+DEDUPE_SECONDS = 120
+
+
+def already_shown(rec):
+    key = (rec.get("ts"), rec.get("title"), rec.get("message"))
+    now = time.time()
+    with _seen_lock:
+        for k, t in list(_seen.items()):
+            if now - t > DEDUPE_SECONDS:
+                del _seen[k]
+        if key in _seen:
+            return True
+        _seen[key] = now
+    return False
 
 
 def show(title, message, urgent=False, project="", app="", entrypoint=""):
@@ -121,6 +169,8 @@ def stream_once(host):
         except ValueError:
             continue
         got = True
+        if already_shown(rec):
+            continue
         show(rec.get("title") or "Claude Code",
              rec.get("message") or "",
              urgent=(rec.get("priority") == "high"),
