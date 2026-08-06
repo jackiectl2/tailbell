@@ -199,18 +199,57 @@ def watch(host, stop):
         backoff = min(backoff * 2, 60)
 
 
+_cluster_cache = {}
+
+
+def cluster_of(host):
+    """Which cluster this host belongs to, or None if tailbell is not installed.
+
+    Every login node of a cluster shares one $HOME, so ~/.tailbell/cluster-id is
+    identical across them and distinct between clusters. Grouping by it is what
+    keeps six connections to Great Lakes from becoming six streams over the same
+    file. Cached: the answer cannot change for a given host.
+    """
+    if host in _cluster_cache:
+        return _cluster_cache[host]
+    cid = None
+    try:
+        r = subprocess.run(["ssh"] + SSH_OPTS + [host, "cat ~/.tailbell/cluster-id"],
+                           timeout=20, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL)
+        out = (r.stdout or b"").decode("utf-8", "replace").strip()
+        cid = out or None
+    except Exception:
+        cid = None
+    if cid:
+        _cluster_cache[host] = cid
+    return cid
+
+
 def main():
-    threads = {}
+    # cluster id -> (host, thread). One live stream per cluster, never per host.
+    streams = {}
     stop = threading.Event()
     while True:
-        for host in discover_hosts():
-            t = threads.get(host)
-            if t is None or not t.is_alive():
-                t = threading.Thread(target=watch, args=(host, stop), daemon=True)
-                threads[host] = t
-                t.start()
-        for host in [h for h, t in threads.items() if not t.is_alive()]:
-            del threads[host]
+        hosts = discover_hosts()
+
+        # Retire finished streams so their cluster can be picked up again, on
+        # whichever node is still connected.
+        for cid in [c for c, (_, t) in streams.items() if not t.is_alive()]:
+            del streams[cid]
+
+        for host in sorted(hosts):
+            if not master_alive(host):
+                continue
+            cid = cluster_of(host)
+            if cid is None:
+                continue                      # tailbell not installed there
+            if cid in streams:
+                continue                      # this cluster already has a stream
+            t = threading.Thread(target=watch, args=(host, stop), daemon=True)
+            streams[cid] = (host, t)
+            t.start()
+
         time.sleep(RESCAN_SECONDS)
 
 
