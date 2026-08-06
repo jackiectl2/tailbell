@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Register (or refresh) tailbell's hooks in ~/.claude/settings.json on this
+# machine. Runs on whatever host Claude Code runs on — a cluster login node, or
+# the workstation for local sessions.
+#
+#   tailbell-register [path-to-tailbell-notify]
+#
+# Split out of the deploy script on purpose: doing this inline over ssh meant
+# nesting a Python program inside single quotes inside a remote command, which is
+# unreadable and broke on the first parenthesis. A file that gets copied and run
+# has none of those problems, and can be tested on its own.
+set -euo pipefail
+
+NOTIFY="${1:-$HOME/.tailbell/bin/tailbell-notify}"
+[ -x "$NOTIFY" ] || { echo "找不到可执行的 tailbell-notify: $NOTIFY"; exit 1; }
+
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY="$(command -v python3 || echo python3)"
+
+"$PY" - "$NOTIFY" <<'PYEOF'
+import json, pathlib, shutil, sys, time
+
+notify = sys.argv[1]
+p = pathlib.Path.home() / ".claude" / "settings.json"
+cfg = {}
+if p.exists():
+    shutil.copy(p, str(p) + ".bak." + time.strftime("%Y%m%d-%H%M%S"))
+    cfg = json.loads(p.read_text())
+
+hooks = cfg.setdefault("hooks", {})
+
+
+def merge(event, arg, matcher=None):
+    """Replace our own entry for this event, leaving every other tool's alone.
+
+    Rewriting the whole event would silently delete hooks belonging to other
+    plugins, which is the kind of damage you only notice weeks later.
+    """
+    entry = {"hooks": [{"type": "command", "command": "%s %s" % (notify, arg)}]}
+    if matcher:
+        entry["matcher"] = matcher
+    kept = [
+        e for e in (hooks.get(event) or [])
+        if "tailbell-notify" not in
+        " ".join(x.get("command", "") for x in e.get("hooks", []))
+    ]
+    hooks[event] = kept + [entry]
+
+
+# Stop / UserPromptSubmit fire everywhere. Notification and StopFailure only fire
+# in some frontends, but cost nothing where they do not. See docs/architecture.md.
+for event in ("Stop", "UserPromptSubmit", "SessionEnd", "Notification",
+              "StopFailure", "Elicitation"):
+    merge(event, event)
+merge("PreToolUse", "AskUserQuestion", matcher="AskUserQuestion")
+
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(cfg, indent=2) + "\n")
+print("已注册 %d 个事件 -> %s" % (len(hooks), notify))
+print("(设置是热加载的,不用重启 Claude Code)")
+PYEOF

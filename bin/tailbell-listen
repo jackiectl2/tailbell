@@ -1,43 +1,55 @@
 #!/usr/bin/python3
 """tailbell listener — stream remote Claude Code events to this workstation.
 
-Runs on the machine with a screen. The remote hook only appends JSON lines to a
-log file; this process tails that file over SSH and hands each line to
-tailbell-show. Nothing is published to any third-party service, so there is no
-quota and no account.
+Runs on the machine with a screen. The agent side appends JSON lines to
+~/.tailbell/events.log on each host; this process tails every one of them over
+SSH and hands each line to tailbell-show. Nothing is published to any third-party
+service, so there is no quota and no account.
 
-Why one listener covers a whole cluster: on Great Lakes /home is a single NFS
-mount shared by all six login nodes and by the compute nodes, so every session
-appends to the same file and tailing it from any one node sees all of them.
-Verified in production: a listener attached to gl-login6 delivered an event
-raised on gl-login4. GNU tail notices the file is on a remote filesystem and
-polls instead of relying on inotify, which is what makes cross-node writes
-visible at all.
+Hosts are DISCOVERED, not configured. Every SSH connection made with the
+ControlMaster settings tailbell installs leaves a socket at ~/.ssh/cm-user@host-port,
+so the set of sockets is exactly the set of machines you are connected to right
+now. That matters because login nodes are not stable: Great Lakes has six and you
+pick one per session, while Lighthouse and Armis2 assign you whichever they like.
+A hardcoded host list would be wrong the moment you opened a different node.
 
-Connections reuse whichever SSH master is already open (ControlMaster), so this
-costs no extra authentication and never triggers a 2FA prompt. Consequence worth
-knowing: events flow only while some master to the cluster is alive. A dead
-connection means silence, not an error.
+Attaching to an existing master costs no authentication and never triggers a 2FA
+prompt. The consequence is worth stating: events flow only while a connection to
+that cluster is alive. A closed editor means silence, not an error.
+
+Within one cluster a single stream is enough, because that cluster's login nodes
+share one NFS $HOME — verified on Great Lakes, where a listener on gl-login6
+delivered an event raised on gl-login4. Across clusters homes are separate, so
+each connected cluster needs its own stream. Hence one thread per host.
 
 The shebang pins /usr/bin/python3 deliberately: a bare `python3` resolves to
 whatever virtualenv happens to be active.
 """
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 
-HOSTS = [h.strip() for h in
-         os.environ.get("TAILBELL_HOSTS", "gl6,greatlakes").split(",") if h.strip()]
+SSH_DIR = os.path.expanduser("~/.ssh")
 REMOTE_LOG = os.environ.get("TAILBELL_REMOTE_LOG", ".tailbell/events.log")
 SHOW = os.environ.get(
     "TAILBELL_SHOW",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "tailbell-show"))
+# Extra hosts to try even without a live master, comma separated. Normally empty:
+# discovery is the point.
+EXTRA = [h.strip() for h in os.environ.get("TAILBELL_HOSTS", "").split(",") if h.strip()]
+# Only tail hosts whose name matches, if set. Use it if you keep SSH masters open
+# to machines that have nothing to do with Claude Code.
+ONLY = os.environ.get("TAILBELL_HOST_PATTERN", "")
 
-# -n0 so a reconnect replays nothing stale; -F so rotation is survivable.
-REMOTE_CMD = ("mkdir -p ~/.tailbell && touch ~/{log} && exec tail -n0 -F ~/{log}"
-              .format(log=REMOTE_LOG))
+RESCAN_SECONDS = 20
+
+# `test -f` first: tailing a host where tailbell was never installed would create
+# state there and stream nothing. Exiting immediately lets us mark it and back off.
+REMOTE_CMD = ("test -f ~/{log} && exec tail -n0 -F ~/{log}".format(log=REMOTE_LOG))
 
 SSH_OPTS = [
     "-o", "BatchMode=yes",          # fail fast rather than hang on a 2FA prompt
@@ -45,22 +57,36 @@ SSH_OPTS = [
     "-o", "ServerAliveCountMax=3",
 ]
 
+_socket_re = re.compile(r"^cm-(?P<user>[^@]+)@(?P<host>.+)-(?P<port>\d+)$")
 
-def has_master(host):
-    """True if an SSH master for host is already up, so we can attach for free."""
+
+def discover_hosts():
+    """Hosts we currently hold an SSH master to, from the ControlPath sockets."""
+    found = set()
+    try:
+        names = os.listdir(SSH_DIR)
+    except OSError:
+        names = []
+    for name in names:
+        m = _socket_re.match(name)
+        if not m:
+            continue
+        host = m.group("host")
+        if ONLY and not re.search(ONLY, host):
+            continue
+        found.add(host)
+    for h in EXTRA:
+        found.add(h)
+    return found
+
+
+def master_alive(host):
     try:
         r = subprocess.run(["ssh", "-O", "check", host], timeout=10,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return r.returncode == 0
     except Exception:
         return False
-
-
-def pick_host():
-    for h in HOSTS:
-        if has_master(h):
-            return h, True
-    return (HOSTS[0] if HOSTS else "gl6"), False
 
 
 def show(title, message, urgent=False, project="", app="", entrypoint=""):
@@ -80,10 +106,12 @@ def show(title, message, urgent=False, project="", app="", entrypoint=""):
         pass
 
 
-def stream(host):
+def stream_once(host):
+    """Tail one host until the connection ends. True if any event arrived."""
     proc = subprocess.Popen(["ssh"] + SSH_OPTS + [host, REMOTE_CMD],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             text=True, bufsize=1)
+    got = False
     for line in proc.stdout:
         line = line.strip()
         if not line:
@@ -92,6 +120,7 @@ def stream(host):
             rec = json.loads(line)
         except ValueError:
             continue
+        got = True
         show(rec.get("title") or "Claude Code",
              rec.get("message") or "",
              urgent=(rec.get("priority") == "high"),
@@ -99,20 +128,40 @@ def stream(host):
              app=rec.get("app") or "",
              entrypoint=rec.get("entrypoint") or "")
     proc.wait()
+    return got
+
+
+def watch(host, stop):
+    """One thread per host: reconnect while the master lives, then retire."""
+    backoff = 5
+    while not stop.is_set():
+        if not master_alive(host):
+            # The connection is gone; the supervisor will re-add this host if it
+            # comes back, so let the thread end rather than poll forever.
+            return
+        try:
+            stream_once(host)
+            backoff = 5
+        except Exception:
+            pass
+        if stop.wait(backoff):
+            return
+        backoff = min(backoff * 2, 60)
 
 
 def main():
-    backoff = 5
+    threads = {}
+    stop = threading.Event()
     while True:
-        host, attached = pick_host()
-        try:
-            stream(host)
-        except Exception:
-            pass
-        time.sleep(backoff)
-        # Back off only while no master exists (editor disconnected), so we are
-        # not spawning an ssh every few seconds all night.
-        backoff = 5 if attached else min(backoff * 2, 120)
+        for host in discover_hosts():
+            t = threads.get(host)
+            if t is None or not t.is_alive():
+                t = threading.Thread(target=watch, args=(host, stop), daemon=True)
+                threads[host] = t
+                t.start()
+        for host in [h for h, t in threads.items() if not t.is_alive()]:
+            del threads[host]
+        time.sleep(RESCAN_SECONDS)
 
 
 if __name__ == "__main__":
