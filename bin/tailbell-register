@@ -39,11 +39,14 @@ def merge(event, arg, matcher=None):
     entry = {"hooks": [{"type": "command", "command": "%s %s" % (notify, arg)}]}
     if matcher:
         entry["matcher"] = matcher
-    kept = [
-        e for e in (hooks.get(event) or [])
-        if "tailbell-notify" not in
-        " ".join(x.get("command", "") for x in e.get("hooks", []))
-    ]
+    def ours(e):
+        cmds = " ".join(x.get("command", "") for x in e.get("hooks", []))
+        # cc-notify.sh is the pre-tailbell prototype these scripts grew out of.
+        # Leaving it registered would fire two notifications per event, so the
+        # switchover drops it here rather than asking anyone to hand-edit JSON.
+        return "tailbell-notify" in cmds or "cc-notify.sh" in cmds
+
+    kept = [e for e in (hooks.get(event) or []) if not ours(e)]
     hooks[event] = kept + [entry]
 
 

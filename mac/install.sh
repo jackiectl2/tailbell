@@ -5,44 +5,49 @@
 # terminal, which in a Remote-SSH window is on the cluster.
 #
 # What it sets up:
-#   1. SSH connection reuse (ControlMaster) for the cluster hosts, so the listener
-#      can attach to the connection the editor already holds and never triggers a
-#      2FA prompt of its own.
-#   2. tailbell-listen as a LaunchAgent: starts at login, restarts if it dies.
-#   3. Local hooks, so Claude Code running on this Mac notifies directly instead
-#      of going through the log.
+#   1. SSH connection reuse (ControlMaster). The listener attaches to connections
+#      your editor already holds, so it never triggers a 2FA prompt of its own —
+#      and, because every such connection leaves a socket behind, it is also how
+#      hosts get discovered rather than configured.
+#   2. The Hammerspoon renderer, if Hammerspoon is installed. Optional: without it
+#      alerts fall back to a top-right banner.
+#   3. tailbell-listen as a LaunchAgent: starts at login, restarts if it dies.
+#   4. Local hooks, so Claude Code running on this Mac notifies directly.
+#
+# It also retires the cc-notify.sh prototype this grew out of, if present, so the
+# two do not both fire.
 #
 # Installs nothing from Homebrew and requires no third-party service: rendering
 # falls back to osascript, which ships with macOS.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-HOSTS="${TAILBELL_HOSTS:-gl6,greatlakes,greatlakes.arc-ts.umich.edu}"
-SCP_HOST="${TAILBELL_SCP_HOST:-${HOSTS%%,*}}"
 TB="$HOME/.tailbell"
 PLIST="$HOME/Library/LaunchAgents/dev.tailbell.listen.plist"
+OLD_PLIST="$HOME/Library/LaunchAgents/sh.claude-code.gl-notify.plist"
 SSHCFG="$HOME/.ssh/config"
 CM_PATH="$HOME/.ssh/cm-%r@%h-%p"
+HSDIR="$HOME/.hammerspoon"
 
 [ "$(uname)" = "Darwin" ] || { echo "这个脚本只在 macOS 上跑。当前: $(uname)"; exit 1; }
 
-echo "==> 1/5 检查前置条件"
+echo "==> 1/6 前置检查"
 [ -x /usr/bin/python3 ] || { echo "需要 /usr/bin/python3: xcode-select --install"; exit 1; }
 echo "    /usr/bin/python3 $(/usr/bin/python3 -V 2>&1 | awk '{print $2}')"
 
-echo "==> 2/5 开启 SSH 连接复用"
+echo "==> 2/6 SSH 连接复用"
 mkdir -p "$HOME/.ssh"; touch "$SSHCFG"; chmod 600 "$SSHCFG"
 if grep -qE '^[[:space:]]*ControlPath' "$SSHCFG"; then
-  echo "    已有 ControlPath 设置,跳过 (不覆盖你的配置)"
+  echo "    已有 ControlPath 设置,保留不动"
 else
   cp "$SSHCFG" "$SSHCFG.bak.$(date +%Y%m%d-%H%M%S)"
   # Appended, not prepended: ssh takes the first value it sees for each option, so
-  # anything already configured for these hosts wins and only the multiplexing
-  # options you had not set get added. %h keeps one master per node, which matters
-  # when the cluster alias round-robins across several login nodes.
+  # anything already configured wins and only the unset multiplexing options are
+  # added. %h keeps one master per node, which matters when a cluster alias
+  # round-robins across login nodes.
   {
     echo ""
-    echo "Host $(printf '%s' "$HOSTS" | tr ',' ' ')"
+    echo "Host *.arc-ts.umich.edu gl* lighthouse* armis*"
     echo "    ControlMaster auto"
     echo "    ControlPath $CM_PATH"
     echo "    ControlPersist 12h"
@@ -50,26 +55,55 @@ else
   echo "    已追加 (原文件已备份)"
 fi
 
-echo "==> 3/5 安装到 $TB"
+echo "==> 3/6 安装到 $TB"
 mkdir -p "$TB/bin" "$TB/state"
-install -m 755 "$REPO/bin/tailbell-show"   "$TB/bin/tailbell-show"
-install -m 755 "$REPO/bin/tailbell-listen" "$TB/bin/tailbell-listen"
-install -m 755 "$REPO/bin/tailbell-notify" "$TB/bin/tailbell-notify"
-install -m 755 "$REPO/bin/tailbell-doctor" "$TB/bin/tailbell-doctor"
+for f in tailbell-notify tailbell-show tailbell-listen tailbell-doctor tailbell-register; do
+  install -m 755 "$REPO/bin/$f" "$TB/bin/$f"
+done
 if [ ! -f "$TB/config" ]; then
-  cat > "$TB/config" <<EOF
-# tailbell workstation config.
-# Rendering happens locally here, so no transport is needed.
-TAILBELL_MIN_SECONDS=60
-TAILBELL_HOSTS="$HOSTS"
-EOF
+  printf '%s\n' \
+    '# tailbell workstation config. Rendering happens locally, so no transport.' \
+    'TAILBELL_MIN_SECONDS=60' \
+    '# Uncomment if you keep SSH masters to machines unrelated to Claude Code:' \
+    '#TAILBELL_HOST_PATTERN="arc-ts"' > "$TB/config"
   chmod 600 "$TB/config"
   echo "    写入 $TB/config"
 else
   echo "    $TB/config 已存在,保留"
 fi
 
-echo "==> 4/5 装 LaunchAgent"
+echo "==> 4/6 Hammerspoon 渲染器 (可选)"
+if [ -d "/Applications/Hammerspoon.app" ]; then
+  mkdir -p "$HSDIR"
+  install -m 644 "$REPO/mac/tailbell.lua" "$HSDIR/tailbell.lua"
+  touch "$HSDIR/init.lua"
+  cp "$HSDIR/init.lua" "$HSDIR/init.lua.bak.$(date +%Y%m%d-%H%M%S)"
+  # Drop the prototype's require so its ⌥Esc binding does not fight ours.
+  /usr/bin/sed -i '' '/require("cc-notify")/d' "$HSDIR/init.lua" 2>/dev/null || true
+  grep -q 'require("tailbell")' "$HSDIR/init.lua" || \
+    printf '\nrequire("tailbell")\n' >> "$HSDIR/init.lua"
+  # Restart rather than just launch: a running Hammerspoon would not pick up the
+  # edited init.lua.
+  killall Hammerspoon 2>/dev/null || true
+  sleep 1
+  open -a Hammerspoon 2>/dev/null || true
+  sleep 5
+  if [ -f "$TB/receipt" ]; then
+    echo "    ✅ 配置已加载 (回执: $(cat "$TB/receipt"))"
+  else
+    echo "    ⚠️  没写出回执 —— Lua 可能有错,看 Hammerspoon 菜单 → Console"
+    echo "       不影响使用:没有回执时会自动退回右上角横幅"
+  fi
+else
+  echo "    没装 Hammerspoon —— 用右上角横幅,这是保底路径,正常"
+fi
+
+echo "==> 5/6 LaunchAgent"
+if [ -f "$OLD_PLIST" ]; then
+  launchctl unload "$OLD_PLIST" 2>/dev/null || true
+  mv "$OLD_PLIST" "$OLD_PLIST.retired"
+  echo "    已停用旧的 sh.claude-code.gl-notify"
+fi
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -84,7 +118,6 @@ cat > "$PLIST" <<PLIST_EOF
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>TAILBELL_HOSTS</key><string>$HOSTS</string>
     <key>TAILBELL_SHOW</key><string>$TB/bin/tailbell-show</string>
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
@@ -98,48 +131,29 @@ launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
 echo "    已加载 dev.tailbell.listen"
 
-echo "==> 5/5 本地 hooks (Claude Code 直接跑在这台 Mac 上时用)"
-/usr/bin/python3 - "$TB" <<'PY'
-import json, pathlib, shutil, sys, time
-tb = sys.argv[1]
-p = pathlib.Path.home()/".claude"/"settings.json"
-cfg = {}
-if p.exists():
-    shutil.copy(p, str(p) + ".bak." + time.strftime("%Y%m%d-%H%M%S"))
-    cfg = json.loads(p.read_text())
-N = "%s/bin/tailbell-notify" % tb
-h = cfg.setdefault("hooks", {})
-def one(ev, arg, matcher=None):
-    e = {"hooks": [{"type": "command", "command": "%s %s" % (N, arg)}]}
-    if matcher:
-        e["matcher"] = matcher
-    h[ev] = [e]
-one("Stop", "Stop")
-one("UserPromptSubmit", "UserPromptSubmit")
-one("SessionEnd", "SessionEnd")
-one("Notification", "Notification")
-one("PreToolUse", "AskUserQuestion", matcher="AskUserQuestion")
-p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text(json.dumps(cfg, indent=2) + "\n")
-print("    已合并 ~/.claude/settings.json (旧文件已备份)")
-PY
+echo "==> 6/6 本地 hooks"
+bash "$TB/bin/tailbell-register" "$TB/bin/tailbell-notify" | sed 's/^/    /'
 
 cat <<DONE
 
 ────────────────────────────────────────────────
-装好了。还剩一步要你手动做 —— 建立共享 SSH 连接
-(需要 2FA 的话就在这里认证一次,之后 12 小时复用):
+工作站侧装好了。
 
-    ssh ${SCP_HOST} true
+接下来把 agent 侧推到各个集群 —— 每台集群都要一份,因为
+Claude Code 读的是它自己所在机器的文件系统:
 
-然后验证:
+    bash $REPO/mac/deploy.sh <你的集群别名> ...
+
+集群没有连接的话先建一条 (2FA 在这里认证一次,之后 12 小时复用):
+
+    ssh <别名> true
+
+自检:
 
     $TB/bin/tailbell-doctor --test
 
-它会逐项检查并真发一条通知。
-
-第一次没看到弹窗,九成是这个:
-    系统设置 › 通知 › Script Editor → 允许通知
-osascript 的通知以 Script Editor 的身份出现,没授权时会静默丢弃。
+第一次没看到通知,九成是这个:
+系统设置 › 通知 › Script Editor → 允许通知。osascript 的通知
+以 Script Editor 身份出现,没授权会静默丢弃。
 ────────────────────────────────────────────────
 DONE
