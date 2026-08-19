@@ -179,7 +179,67 @@ silent failure the default and cost real debugging time. `~/.tailbell/debug.log`
 records what each invocation decided and why, so *"why didn't it notify me"* has an
 answer on disk rather than requiring a re-run.
 
-## 7. macOS rendering
+## 7. Release 8: channels, and answering from a phone
+
+### Why the ntfy sink uses the JSON publishing API, and what was actually measured
+
+The first version put the title in an HTTP `Title:` header. Titles here are CJK
+(`✅ bradley · 完成`), and header values are US-ASCII/ISO-8859-1 by spec, so this
+looked like a latent bug.
+
+**Measured 2026-08-19, and it is not one.** Publishing `Title: 完成 ✅` as a raw
+header to `ntfy.sh` and reading the message back gives `title=<完成 ✅>` —
+byte-identical to the same title sent through the JSON API. curl transmits the
+raw UTF-8 and ntfy decodes it as UTF-8. So the header form works against
+ntfy.sh today.
+
+The JSON API is used anyway, for two reasons that survive the measurement:
+
+1. It does not depend on that leniency. The bytes pass through whatever proxy
+   ARC presets on compute nodes and, for a self-hosted server, whatever reverse
+   proxy sits in front of it; header sanitisation is a normal thing for those to
+   do and a truncated title is a silent failure.
+2. Action buttons — which the approval path needs — have no header form at all.
+   One request shape for both is one thing to get right.
+
+Recording the negative result rather than the assumption, because "we changed it
+because it was broken" would have been a claim this file could not back up.
+
+### Why answering from a phone needs nothing listening on the agent host
+
+The obvious design is an inbound channel: hold a port, let the phone reach it.
+That is the same design §3 already rejected for delivery, and it fails for the
+same reason — **the loopback interface of a shared login node belongs to every
+user of that node.** A port is not yours; a neighbour can hold it; and here the
+consequence is worse than a leaked notification, because whatever answers on
+that port decides whether a command runs.
+
+So the return path is outbound only. `tailbell-approve` POSTs the request and
+then polls for the answer. Two outbound HTTPS calls, no socket bound, nothing a
+neighbour can take.
+
+What that buys, and what it does not, is written out in
+[v8-design.md](v8-design.md) §2 and summarised at the point of configuration.
+The short version: the approval topic is deliberately not the notification
+topic, so the topic that ends up in screenshots grants nothing; each request
+carries a 128-bit token from `/dev/urandom`; a late reply is refused against the
+timestamp the message itself carries; and no answer never becomes yes.
+
+### Why `/dev/urandom` and not `$RANDOM`
+
+`$RANDOM` is 15 bits from a seeded PRNG. It is the only thing standing between
+someone on the topic and an approved command, so it is not a place to save a
+subprocess.
+
+### Why network sinks are backgrounded
+
+Three channels at an 8 s timeout is 24 s of stalled `Stop` hook. Backgrounding
+them has one trap worth naming: the child must have stdout closed first.
+Claude Code reads the hook's pipe, and a child that inherits it keeps the pipe
+open after the parent exits — so the hook appears to hang for exactly as long as
+`curl` does, which is the thing backgrounding was supposed to fix.
+
+## 8. macOS rendering
 
 `osascript` is the guaranteed path: it ships with the OS. Its two traps are
 documented rather than worked around — notifications are attributed to **Script

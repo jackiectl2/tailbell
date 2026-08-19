@@ -15,7 +15,11 @@ justification for every design choice, and each claim in it is a measurement.**
 Several obvious-looking "improvements" are already ruled out there with evidence:
 
 - Do **not** switch the signal to the `Notification` hook. It fires **0 times** in
-  the chat panel (measured, extension 2.1.220).
+  the chat panel — measured over three weeks, not one session.
+- `PermissionRequest` **does** fire in the chat panel, but only ever for
+  `AskUserQuestion` (16/16 fires). It is not a source of tool permission prompts
+  there, and `PreToolUse:AskUserQuestion` already covers what it does carry — so
+  hooking it for notifications would only double them up.
 - Do **not** replace the log transport with SSH `RemoteForward`. On a shared login
   node the loopback interface is shared across users, so a port collision sends
   your notifications to a stranger's machine.
@@ -23,18 +27,30 @@ Several obvious-looking "improvements" are already ruled out there with evidence
   reply text; emitting it would leak the conversation.
 - Do **not** treat a missing start marker as `elapsed = 0`. That silently dropped
   notifications and is the bug `tests/run-tests.sh` guards against.
+- Do **not** read `PermissionRequest`'s `tool_input` either. For `AskUserQuestion`
+  it is the full text of every question — the same leak as above, by a second door.
+- Do **not** build two-way remote control, and do **not** read
+  `~/.claude/.credentials.json`. Both were evaluated and declined, in
+  [docs/two-way-control.md](docs/two-way-control.md) and
+  [docs/usage-quota.md](docs/usage-quota.md). Each page says what would change
+  the answer; reopen it with that evidence, not with a fresh opinion.
 
 ## Layout
 
 | path | what |
 | --- | --- |
+| `bin/tailbell` | the single entry point; both packages are wrappers over it |
 | `bin/tailbell-notify` | runs as a hook on the agent host: decide, then emit |
+| `bin/tailbell-approve` | `PermissionRequest` hook: ask a phone, answer for you |
 | `bin/tailbell-listen` | runs on the workstation: tail the remote log over SSH |
-| `bin/tailbell-show` | runs on the workstation: choose how to draw the alert |
-| `bin/tailbell-doctor` | check every link; works on either side |
+| `bin/tailbell-show` | runs on the workstation: choose how to draw the alert, and which sound |
+| `bin/tailbell-doctor` | check every link, including each channel; works on either side |
+| `bin/tailbell-register` | merge hooks into `~/.claude/settings.json`; `--approve` adds the approval hook |
 | `hooks/hooks.json` | plugin hook registration (`${CLAUDE_PLUGIN_ROOT}` paths) |
 | `install.sh` | agent side, for use without the plugin system |
 | `mac/install.sh` | workstation side |
+| `Formula/` · `package.json` · `packaging/` | brew, npm, and the one-line installer |
+| `tests/fake-curl` | records requests instead of making them, and doubles as a phone |
 | `docs/roadmap.md` | the eight releases and where the branch boundaries sit |
 
 Runtime state lives entirely outside the repo, in `~/.tailbell/`
@@ -56,6 +72,19 @@ committed.
   this way, including a doubled here-document that parses as truncation.
 - **Add a test for anything that broke.** `tests/run-tests.sh` runs against a
   throwaway `TAILBELL_HOME` and is the regression record, not just a test suite.
+- **The suite must never need the network.** Anything that reaches outside goes
+  through an injectable command — `TAILBELL_CURL`, `TAILBELL_OSASCRIPT`,
+  `TAILBELL_AFPLAY`, `TAILBELL_SAY`, `TAILBELL_FOCUS_CMD` — and the test points
+  it at a recorder. Add a channel, add its seam; do not add a live call.
+- **A new delivery channel is a `sink_<name>` function plus a row in the doctor's
+  table.** If you find yourself adding a branch to the event logic in
+  `tailbell-notify`, the table is the thing to extend instead.
+- **Optional means optional.** Every channel, sound, and the approval path are
+  off with an empty config, and a test asserts that an unconfigured tailbell
+  makes zero network calls. That test is the release 0 guarantee in executable
+  form — do not weaken it to make something else easier.
+- **Nothing but the decision JSON may reach `tailbell-approve`'s stdout.**
+  Claude Code parses it; one stray `echo` turns a decision into plain text.
 - Commit after each change; **do not push** unless the user asks.
 
 ## Branch convention
@@ -71,7 +100,8 @@ third-party component load-bearing on the v0 path, that is a regression.
 ## Verify
 
 ```bash
-bash tests/run-tests.sh          # 20 cases, no side effects
-bin/tailbell-doctor --test       # end to end; run on BOTH sides
+bash tests/run-tests.sh          # 107 cases, no side effects, no network
+bin/tailbell-doctor --test       # end to end, every channel; run on BOTH sides
 claude plugin validate .         # manifest and hook schema
+bash -n <every shell file>       # two real syntax errors have shipped this way
 ```
