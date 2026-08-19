@@ -361,6 +361,100 @@ unset TAILBELL_CHANNELS TAILBELL_NTFY_TOPIC TAILBELL_NTFY_SERVER \
 
 ########################################################################
 echo
+echo "── 手机审批 ──"
+#
+# tests/fake-curl doubles as the phone here: when it sees a POST carrying ntfy
+# action buttons it reads the request id and token out of the button and writes
+# back the reply that pressing it would send. So the whole round trip — publish,
+# tap, poll, verify — runs with no network and no server, which is the only way
+# a path this security-sensitive gets regression-tested at all.
+
+APPROVER="$REPO/bin/tailbell-approve"
+AH="$TMP/approvehome"; mkdir -p "$AH/state"
+
+approve_cfg() {
+  : > "$AH/config"
+  printf '%s\n' "$@" >> "$AH/config"
+  printf '%s\n' "TAILBELL_CURL=\"$REPO/tests/fake-curl\"" \
+                "TAILBELL_APPROVE_TTL=4" "TAILBELL_APPROVE_POLL=1" >> "$AH/config"
+}
+# ask <phone-behaviour> [tool] -> whatever the hook printed for Claude Code
+ask() {
+  : > "$AH/poll.json"
+  printf '{"session_id":"abcd1234-0000-0000-0000-000000000000","cwd":"/x/demo","tool_name":"%s","tool_input":{"command":"CANARY-COMMAND"}}' \
+    "${2:-Bash}" \
+    | FAKE_CURL_RECORD="$AH/curl.log" FAKE_CURL_BODY_FILE="$AH/poll.json" \
+      FAKE_PHONE="$1" TAILBELL_HOME="$AH" bash "$APPROVER" 2>/dev/null
+}
+verdict() { printf '%s' "$1" | /usr/bin/python3 -c '
+import sys, json
+t = sys.stdin.read().strip()
+print(json.loads(t)["hookSpecificOutput"]["permissionDecision"] if t else "")' 2>/dev/null; }
+
+approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"' \
+            'TAILBELL_NTFY_TOPIC="tb-notify-public"'
+
+check "手机点「允许」→ allow" "$(verdict "$(ask allow)")" "allow"
+check "手机点「拒绝」→ deny"  "$(verdict "$(ask deny)")"  "deny"
+
+# The three ways a reply must be refused. Each prints nothing at all, which is
+# what makes Claude Code fall through to its own prompt — silence is never yes.
+check "token 对不上 → 不做决定" "$(verdict "$(ask wrongtoken)")" ""
+check "请求 id 对不上 → 不做决定" "$(verdict "$(ask wrongreq)")" ""
+# "Late" is checked against the timestamp the message carries, so it is refused
+# on the evidence rather than because we happened to stop looking.
+check "回复晚于截止时间 → 不做决定" "$(verdict "$(ask late)")" ""
+check "没人回 → 不做决定,交回本地弹窗" "$(verdict "$(ask none)")" ""
+
+# tool_input is the command line. Approving without seeing it is the deliberate
+# trade; leaking it to a third-party server is not.
+if grep -q 'CANARY-COMMAND' "$AH/curl.log"; then no "tool_input 被推到了第三方服务器!"
+else ok "推送里不含 tool_input (命令原文不出机器)"; fi
+if grep -q 'Bash' "$AH/curl.log"; then ok "推送里有工具名,够你判断"
+else no "推送里连工具名都没有,没法判断"; fi
+
+# Sharing one topic would hand approval rights to everyone who can read your
+# ordinary "turn finished" pings. That must be refused, not silently allowed.
+approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="same-topic"' \
+            'TAILBELL_NTFY_TOPIC="same-topic"'
+check "审批 topic 和通知 topic 相同 → 拒绝工作" "$(verdict "$(ask allow)")" ""
+if grep -q 'same as the notification topic' "$TAILBELL_DEBUG_LOG"; then ok "并说明为什么拒绝"
+else no "拒绝了但没说原因"; fi
+
+# Off by default, and off means off even if a topic is sitting in the config.
+approve_cfg 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"'
+check "没开 TAILBELL_APPROVE → 不介入" "$(verdict "$(ask allow)")" ""
+: > "$AH/curl.log"; ask allow >/dev/null
+if [ -s "$AH/curl.log" ]; then no "没开审批却还是发了请求"
+else ok "没开审批时一个请求都不发"; fi
+
+# Turned on but nowhere to send it: fall through, and say so.
+approve_cfg 'TAILBELL_APPROVE=1'
+check "开了但没配 topic → 不介入" "$(verdict "$(ask allow)")" ""
+
+# In the chat panel this hook only ever fires for AskUserQuestion, which
+# PreToolUse has already notified about — and two buttons cannot answer a
+# multiple-choice question anyway.
+approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"'
+: > "$AH/curl.log"; ask allow AskUserQuestion >/dev/null
+if [ -s "$AH/curl.log" ]; then no "AskUserQuestion 也去要审批了 (会重复通知)"
+else ok "AskUserQuestion 不走审批,避免重复通知"; fi
+
+# Narrowing to specific tools is how you avoid holding up every prompt.
+approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"' \
+            'TAILBELL_APPROVE_TOOLS="Write,Edit"'
+check "不在 TAILBELL_APPROVE_TOOLS 里的工具不介入" "$(verdict "$(ask allow Bash)")" ""
+check "在清单里的工具照常介入" "$(verdict "$(ask allow Write)")" "allow"
+
+# A hook that writes anything else to stdout turns a decision into plain text —
+# Claude Code parses this, and "does not start with {" means it is ignored.
+out="$(ask allow Write)"
+if [ "$(printf '%s' "$out" | wc -l)" -le 1 ] && printf '%s' "$out" | head -c1 | grep -q '{'; then
+  ok "stdout 只有决定 JSON,没有别的输出"
+else no "stdout 混进了别的东西,决定会被当成纯文本"; fi
+
+########################################################################
+echo
 echo "── 安装 ──"
 
 # install.sh used to carry its own copy of the settings.json merge. It drifted:

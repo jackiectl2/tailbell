@@ -38,7 +38,8 @@ for HOST in "$@"; do
   echo "==> 2/3 复制 bin/"
   ssh -o BatchMode=yes "$HOST" 'mkdir -p ~/.tailbell/bin ~/.tailbell/state'
   scp -q "$REPO/bin/tailbell-notify" "$REPO/bin/tailbell-doctor" \
-         "$REPO/bin/tailbell-register" "$HOST:.tailbell/bin/"
+         "$REPO/bin/tailbell-register" "$REPO/bin/tailbell-approve" \
+         "$HOST:.tailbell/bin/"
   ssh -o BatchMode=yes "$HOST" 'chmod +x ~/.tailbell/bin/*'
 
   # The settings.json merge lives in tailbell-register rather than inline here.

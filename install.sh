@@ -74,6 +74,25 @@ TAILBELL_MIN_SECONDS=60
 # that up on its own. Set this only to override a preset one that is wrong.
 #TAILBELL_HTTP_PROXY=""
 #TAILBELL_HTTP_TIMEOUT=8
+
+# ---------------------------------------------------------------------------
+# Approve or deny a permission prompt from your phone. Terminal CLI only — in
+# the VS Code chat panel there is no permission event to hook (measured; see
+# docs/architecture.md §1).
+#
+# Register the hook with:  tailbell-register --approve
+# Then turn it on here. Both steps are needed, deliberately: this hook holds the
+# prompt for up to TTL seconds while it waits for you, which is what you want
+# when you are away from the keyboard and not what you want when you are at it.
+#
+# THE APPROVAL TOPIC MUST NOT BE THE NOTIFICATION TOPIC. Anyone who can read the
+# topic can answer the prompt, and your notification topic is the one that ends
+# up in screenshots. tailbell refuses to run if you set them to the same value.
+#TAILBELL_APPROVE=0
+#TAILBELL_APPROVE_TOPIC=""        # a SECOND, long random topic, not the one above
+#TAILBELL_APPROVE_TOKEN=""        # ntfy auth token — strongly recommended here
+#TAILBELL_APPROVE_TTL=90
+#TAILBELL_APPROVE_TOOLS=""        # e.g. "Bash,Write" — empty means every prompt
 EOF
   chmod 600 "$TB/config"
   echo "    写入 $TB/config"

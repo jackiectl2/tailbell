@@ -4,7 +4,7 @@
 # arrived from a remote host, and directly by tailbell-notify when Claude Code is
 # running locally.
 #
-# Usage: tailbell-show <title> <message> [urgent] [project] [app] [entrypoint]
+# Usage: tailbell-show <title> <message> [urgent] [project] [app] [entrypoint] [kind]
 #
 #   project    — project directory name; the renderer matches it against window
 #                titles so a click focuses the window that raised the alert.
@@ -12,6 +12,9 @@
 #                it out (local sessions only).
 #   entrypoint — the frontend kind Claude Code reports; survives SSH, so it is all
 #                a remote session can offer.
+#   kind       — done | question | permission | idle | error. What happened, as
+#                opposed to how it is worded. The sound is chosen from this, so
+#                the three cases are distinguishable without looking.
 #
 # Renderers, in order. The guarantee of this version is the last one: osascript
 # ships with macOS, so the zero-dependency path always exists. The two above it
@@ -41,6 +44,7 @@ urgent="${3:-}"
 project="${4:-}"
 app="${5:-}"
 entrypoint="${6:-}"
+kind="${7:-}"
 
 # Never a bare `python3`: with a virtualenv active that resolves to whichever
 # interpreter the current project happens to use.
@@ -55,7 +59,7 @@ if [ "$renderer" = "auto" ] || [ "$renderer" = "hammerspoon" ]; then
     nonce="$$-$(date +%s)-$RANDOM"
     u=0; [ -n "$urgent" ] && u=1
     # -g keeps Hammerspoon in the background so the alert never steals focus.
-    open -g "hammerspoon://tailbell?title=$(q "$title")&message=$(q "$message")&urgent=$u&project=$(q "$project")&app=$(q "$app")&entrypoint=$(q "$entrypoint")&nonce=$nonce" >/dev/null 2>&1
+    open -g "hammerspoon://tailbell?title=$(q "$title")&message=$(q "$message")&urgent=$u&project=$(q "$project")&app=$(q "$app")&entrypoint=$(q "$entrypoint")&kind=$(q "$kind")&nonce=$nonce" >/dev/null 2>&1
 
     # ~1.2s is long enough for a live handler and short enough that a dead one
     # still gets you notified promptly by the fallback below.

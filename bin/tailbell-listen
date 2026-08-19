@@ -137,11 +137,17 @@ def already_shown(rec):
     return False
 
 
-def show(title, message, urgent=False, project="", app="", entrypoint=""):
-    """Hand off to tailbell-show, which owns how the alert is drawn."""
+def show(title, message, urgent=False, project="", app="", entrypoint="",
+         kind=""):
+    """Hand off to tailbell-show, which owns how the alert is drawn.
+
+    `kind` is what the renderer picks a sound from, so an older tailbell-show
+    that ignores a seventh argument degrades to the previous behaviour instead
+    of breaking — which is what a half-updated pair of machines looks like.
+    """
     if os.access(SHOW, os.X_OK):
         argv = [SHOW, title, message, "urgent" if urgent else "",
-                project or "", app or "", entrypoint or ""]
+                project or "", app or "", entrypoint or "", kind or ""]
     else:
         argv = ["/usr/bin/osascript", "-e",
                 'display notification %s with title %s sound name "Glass"'
@@ -176,7 +182,8 @@ def stream_once(host):
              urgent=(rec.get("priority") == "high"),
              project=rec.get("project") or "",
              app=rec.get("app") or "",
-             entrypoint=rec.get("entrypoint") or "")
+             entrypoint=rec.get("entrypoint") or "",
+             kind=rec.get("kind") or "")
     proc.wait()
     return got
 

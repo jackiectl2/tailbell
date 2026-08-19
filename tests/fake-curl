@@ -15,6 +15,20 @@
 #   FAKE_CURL_EXIT   exit status to return      (default 0)
 #   FAKE_CURL_SLEEP  seconds to stall           (default 0) — used to prove the
 #                    hook returns without waiting for a slow channel
+#   FAKE_CURL_BODY_FILE  file whose contents are served as the response body.
+#                    With -o, written there; without, printed. This is how the
+#                    approval poll gets an answer with no server involved.
+#
+# And one more, which is a whole fake phone:
+#
+#   FAKE_PHONE       allow | deny | wrongtoken | wrongreq | late
+#                    When a POST carries ntfy action buttons, read the request id
+#                    and token straight out of the button the phone would press,
+#                    and write the reply it would send into FAKE_CURL_BODY_FILE.
+#                    The next poll then finds it. That exercises the real round
+#                    trip — publish, tap, poll, verify — without a network, which
+#                    is the only way an approval path this security-sensitive can
+#                    be regression-tested at all.
 set -u
 
 REC="${FAKE_CURL_RECORD:-/dev/null}"
@@ -22,7 +36,7 @@ CODE="${FAKE_CURL_CODE:-200}"
 RC="${FAKE_CURL_EXIT:-0}"
 SLEEP="${FAKE_CURL_SLEEP:-0}"
 
-url=""; body=""; method="GET"; proxy=""; headers=""
+url=""; body=""; method="GET"; proxy=""; headers=""; outfile=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,7 +45,8 @@ HEADER $2"; shift 2 ;;
     --data-binary|-d) body="$2"; shift 2 ;;
     --proxy|-x)       proxy="$2"; shift 2 ;;
     -X)               method="$2"; shift 2 ;;
-    -m|-o|-w|--max-time|--output|--write-out) shift 2 ;;
+    -o|--output)      outfile="$2"; shift 2 ;;
+    -m|-w|--max-time|--write-out) shift 2 ;;
     -*)               shift ;;          # -s, -S, -sS and friends carry no value
     *)                url="$1"; shift ;;
   esac
@@ -48,6 +63,55 @@ done
   printf 'END\n'
 } >> "$REC" 2>/dev/null
 
+# The fake phone: press a button on whatever was just pushed.
+if [ -n "${FAKE_PHONE:-}" ] && [ -n "${FAKE_CURL_BODY_FILE:-}" ] && [ -n "$body" ]; then
+  printf '%s' "$body" | /usr/bin/python3 -c '
+import json, sys, time
+want, dest = sys.argv[1], sys.argv[2]
+try:
+    msg = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(0)
+actions = msg.get("actions") or []
+if not actions:
+    sys.exit(0)                      # not an approval request; nothing to press
+by_label = {}
+for a in actions:
+    parts = (a.get("body") or "").split()
+    if len(parts) == 3:
+        by_label[parts[0]] = parts
+if want not in ("allow", "deny", "wrongtoken", "wrongreq", "late"):
+    sys.exit(0)              # anything else means "the phone stays in your pocket"
+choice = "deny" if want == "deny" else "allow"
+parts = by_label.get(choice)
+if not parts:
+    sys.exit(0)
+decision, req, token = parts
+if want == "wrongtoken":
+    token = "0" * len(token)
+if want == "wrongreq":
+    req = "0" * len(req)
+stamp = int(time.time()) + (86400 if want == "late" else 0)
+with open(dest, "a") as f:
+    f.write(json.dumps({"event": "message", "time": stamp,
+                        "message": "%s %s %s" % (decision, req, token)}) + "\n")
+' "$FAKE_PHONE" "$FAKE_CURL_BODY_FILE" 2>/dev/null
+fi
+
 [ "$SLEEP" = "0" ] || sleep "$SLEEP"
-printf '%s' "$CODE"
+
+# curl semantics: with -o the body goes to the file and stdout carries only what
+# -w asked for; without -o the body itself goes to stdout.
+if [ -n "$outfile" ]; then
+  if [ -n "${FAKE_CURL_BODY_FILE:-}" ] && [ -f "${FAKE_CURL_BODY_FILE:-}" ]; then
+    cat "$FAKE_CURL_BODY_FILE" > "$outfile" 2>/dev/null
+  else
+    : > "$outfile" 2>/dev/null
+  fi
+  printf '%s' "$CODE"
+elif [ -n "${FAKE_CURL_BODY_FILE:-}" ] && [ -f "${FAKE_CURL_BODY_FILE:-}" ]; then
+  cat "$FAKE_CURL_BODY_FILE"
+else
+  printf '%s' "$CODE"
+fi
 exit "$RC"
