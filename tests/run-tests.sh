@@ -105,7 +105,7 @@ while IFS= read -r l; do
 import sys, json
 d = json.load(sys.stdin)
 for k in ("ts", "title", "message", "priority", "project", "node",
-          "app", "entrypoint"):
+          "app", "entrypoint", "kind"):
     assert k in d, k
 ' 2>/dev/null || bad=$((bad+1))
 done < "$TAILBELL_LOG"
@@ -174,6 +174,190 @@ now=$(stat -c %s "$TAILBELL_LOG")
 if [ "$now" -lt "$big" ] && [ "$(lines)" -le 201 ]; then
   ok "超过 1 MB 后自动截断到最近 200 行 ($((big/1024)) KB → $((now/1024)) KB)"
 else no "轮转没生效 ($big → $now bytes, $(lines) 行)"; fi
+
+########################################################################
+echo
+echo "── 送达通道 ──"
+#
+# Every case below runs through tests/fake-curl, which records the request
+# instead of making it. The suite must work with the network unplugged: that is
+# a release 8 guardrail, not a convenience.
+
+FAKE="$REPO/tests/fake-curl"
+REC="$TMP/curl.log"
+export TAILBELL_CURL="$FAKE"
+export FAKE_CURL_RECORD="$REC"
+export TAILBELL_SYNC=1          # determinism: sinks are backgrounded by default
+
+# grep -c prints 0 and *exits 1* when nothing matches, so `|| echo 0` appends a
+# second line and every comparison against it fails. Capture, ignore the status.
+calls() { local n; n="$(grep -c '^CALL$' "$REC" 2>/dev/null)"; echo "${n:-0}"; }
+reset() { : > "$REC"; }
+# The body of the Nth (default last) recorded call.
+body_of() { grep '^BODY ' "$REC" | tail -n "${1:-1}" | head -1 | cut -c6-; }
+url_of()  { grep '^URL ' "$REC" | tail -n "${1:-1}" | head -1 | cut -c5-; }
+# One field out of a recorded JSON body, so a shape change fails loudly.
+field()   { body_of | /usr/bin/python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for k in sys.argv[1].split('.'):
+    d = d[int(k)] if isinstance(d, list) else d[k]
+print(d)" "$1" 2>/dev/null; }
+
+# --- the guarantee: an unconfigured tailbell makes no network call at all -----
+# This is release 0's path. If it ever reaches for the network, release 8 has
+# failed regardless of what else works.
+reset
+s=$(sid n001); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
+b=$(lines); fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/proj-v0\"}"
+check "没配通道时仍写 events.log" "$(( $(lines) - b ))" "1"
+check "没配通道时一个网络请求都不发" "$(calls)" "0"
+
+# --- ntfy ---------------------------------------------------------------------
+reset
+export TAILBELL_CHANNELS="ntfy"
+export TAILBELL_NTFY_TOPIC="tb-test-topic"
+export TAILBELL_NTFY_SERVER="https://ntfy.example"
+b=$(lines); fire AskUserQuestion "{\"session_id\":\"$(sid n002)\",\"cwd\":\"/x/proj-ntfy\"}"
+check "ntfy 发出一次请求" "$(calls)" "1"
+check "ntfy 走 JSON 发布接口 (根路径,不是 /topic)" "$(url_of)" "https://ntfy.example"
+check "ntfy body 带 topic" "$(field topic)" "tb-test-topic"
+check "ntfy 把 high 映射成数字 4" "$(field priority)" "4"
+# A CJK title in an HTTP header is officially ISO-8859-1 and gets mangled; the
+# JSON body is UTF-8 by definition. This asserts we send it in the body.
+if body_of | grep -q '在等你回答'; then ok "ntfy 标题走 body,中文不进 header"
+else no "ntfy 标题没进 body"; fi
+check "只走 ntfy 时不写 events.log" "$(( $(lines) - b ))" "0"
+
+# The topic is the only thing that makes the message deliverable, so no topic
+# must be a logged skip, never a request to a URL that means nothing.
+reset; unset TAILBELL_NTFY_TOPIC
+fire AskUserQuestion "{\"session_id\":\"$(sid n003)\",\"cwd\":\"/x/p\"}"
+check "没配 topic 时不发请求" "$(calls)" "0"
+if grep -q 'SKIPPED ntfy' "$TAILBELL_DEBUG_LOG"; then ok "并记下 SKIPPED ntfy"
+else no "没配 topic 却没记日志"; fi
+export TAILBELL_NTFY_TOPIC="tb-test-topic"
+
+# --- slack / discord / feishu -------------------------------------------------
+reset
+export TAILBELL_CHANNELS="slack"
+export TAILBELL_SLACK_WEBHOOK="https://hooks.slack.com/services/T0/B0/xxx"
+fire AskUserQuestion "{\"session_id\":\"$(sid n004)\",\"cwd\":\"/x/proj-slack\"}"
+check "slack 打到配置的 webhook" "$(url_of)" "https://hooks.slack.com/services/T0/B0/xxx"
+if [ -n "$(field text)" ]; then ok "slack body 是 {text:…}"; else no "slack body 形状不对"; fi
+
+reset
+export TAILBELL_CHANNELS="discord"
+export TAILBELL_DISCORD_WEBHOOK="https://discord.com/api/webhooks/1/xxx"
+fire AskUserQuestion "{\"session_id\":\"$(sid n005)\",\"cwd\":\"/x/proj-discord\"}"
+if [ -n "$(field content)" ]; then ok "discord body 是 {content:…}"; else no "discord body 形状不对"; fi
+
+reset
+export TAILBELL_CHANNELS="feishu"
+export TAILBELL_FEISHU_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/abc"
+fire AskUserQuestion "{\"session_id\":\"$(sid n006)\",\"cwd\":\"/x/proj-feishu\"}"
+check "feishu body 是 text 消息" "$(field msg_type)" "text"
+if [ -n "$(field content.text)" ]; then ok "feishu 文本在 content.text"; else no "feishu 文本位置不对"; fi
+
+# Signed mode: the bot rejects an unsigned request, so the signature has to be
+# there rather than silently omitted.
+reset
+export TAILBELL_FEISHU_SECRET="s3cr3t"
+fire AskUserQuestion "{\"session_id\":\"$(sid n007)\",\"cwd\":\"/x/p\"}"
+if [ -n "$(field sign)" ] && [ -n "$(field timestamp)" ]; then ok "配了 secret 就带签名和时间戳"
+else no "签名模式没带 sign/timestamp"; fi
+unset TAILBELL_FEISHU_SECRET
+
+# --- several channels at once -------------------------------------------------
+reset
+export TAILBELL_CHANNELS="file,ntfy,slack"
+b=$(lines); fire AskUserQuestion "{\"session_id\":\"$(sid n008)\",\"cwd\":\"/x/proj-fan\"}"
+check "一个事件扇出到三条通道" "$(calls)" "2"
+check "其中 file 那条照常落盘" "$(( $(lines) - b ))" "1"
+
+# A channel that fails must not take the others down with it — the whole point
+# of not chaining the sinks on success.
+reset
+FAKE_CURL_CODE=500 fire AskUserQuestion "{\"session_id\":\"$(sid n009)\",\"cwd\":\"/x/p\"}"
+check "一条通道 500 了,其余照发" "$(calls)" "2"
+if grep -q 'FAILED ntfy: HTTP 500' "$TAILBELL_DEBUG_LOG"; then ok "失败带状态码进日志"
+else no "失败没记状态码"; fi
+
+# curl itself dying (DNS, proxy, no route) is a different failure and must also
+# be named rather than swallowed.
+reset
+FAKE_CURL_EXIT=7 FAKE_CURL_CODE=000 fire AskUserQuestion "{\"session_id\":\"$(sid n010)\",\"cwd\":\"/x/p\"}"
+if grep -q 'FAILED slack: HTTP 000' "$TAILBELL_DEBUG_LOG"; then ok "curl 连不上也记进日志"
+else no "curl 连接失败没记日志"; fi
+
+# --- a name nobody implements --------------------------------------------------
+reset
+export TAILBELL_CHANNELS="file,typo-here,ntfy"
+b=$(lines); fire AskUserQuestion "{\"session_id\":\"$(sid n011)\",\"cwd\":\"/x/p\"}"
+check "拼错的通道不影响其它通道" "$(calls)" "1"
+check "拼错的通道不影响落盘" "$(( $(lines) - b ))" "1"
+if grep -q "unknown channel 'typo-here'" "$TAILBELL_DEBUG_LOG"; then ok "拼错的通道名进日志"
+else no "拼错的通道名没进日志"; fi
+
+# --- the proxy that makes compute nodes work -----------------------------------
+reset
+export TAILBELL_CHANNELS="ntfy"
+TAILBELL_HTTP_PROXY="http://proxy.example:3128" \
+  fire AskUserQuestion "{\"session_id\":\"$(sid n012)\",\"cwd\":\"/x/p\"}"
+if grep -q '^PROXY http://proxy.example:3128$' "$REC"; then ok "配了代理就传给 curl"
+else no "代理没传给 curl (sbatch 里会静默失败)"; fi
+
+# --- privacy, on every channel -------------------------------------------------
+# The file sink has been guarded since release 0. A webhook is a far shorter path
+# to a stranger's screen, so the canary has to cover all of them.
+reset
+export TAILBELL_CHANNELS="file,ntfy,slack,discord,feishu"
+export TAILBELL_DISCORD_WEBHOOK="https://discord.com/api/webhooks/1/xxx"
+export TAILBELL_FEISHU_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/abc"
+s=$(sid n013); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
+fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/p\",\"last_assistant_message\":\"CANARY-STOP\"}"
+if grep -q 'CANARY-STOP' "$REC"; then no "last_assistant_message 通过通道泄露了!"
+else ok "四条通道都没带上 last_assistant_message"; fi
+
+# PermissionRequest.tool_input is the second place a hook is handed conversation
+# content — for AskUserQuestion it is the full text of every question.
+fire AskUserQuestion "{\"session_id\":\"$(sid n014)\",\"cwd\":\"/x/p\",\"tool_input\":{\"questions\":[{\"question\":\"CANARY-QUESTION\"}]}}"
+if grep -q 'CANARY-QUESTION' "$REC" || grep -q 'CANARY-QUESTION' "$TAILBELL_LOG"; then
+  no "tool_input 泄露了!"
+else ok "tool_input 从未被读取"; fi
+
+# --- not blocking the session --------------------------------------------------
+# A hook that waits on three webhooks is a hook that makes every turn feel slow.
+reset
+export TAILBELL_CHANNELS="ntfy"
+unset TAILBELL_SYNC
+t0=$(date +%s)
+FAKE_CURL_SLEEP=3 fire AskUserQuestion "{\"session_id\":\"$(sid n015)\",\"cwd\":\"/x/p\"}"
+t1=$(date +%s)
+if [ "$(( t1 - t0 ))" -lt 3 ]; then ok "慢通道不阻塞 hook (用时 $(( t1 - t0 ))s)"
+else no "hook 等了慢通道 $(( t1 - t0 ))s"; fi
+export TAILBELL_SYNC=1
+t0=$(date +%s)
+FAKE_CURL_SLEEP=2 fire AskUserQuestion "{\"session_id\":\"$(sid n016)\",\"cwd\":\"/x/p\"}"
+t1=$(date +%s)
+if [ "$(( t1 - t0 ))" -ge 2 ]; then ok "TAILBELL_SYNC=1 时同步等待 (给 doctor 和测试用)"
+else no "TAILBELL_SYNC=1 没有同步"; fi
+
+# --- kind, which sound selection and routing key on ---------------------------
+reset
+export TAILBELL_CHANNELS="file"
+kind_of() { tail -1 "$TAILBELL_LOG" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin)["kind"])'; }
+s=$(sid n017); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
+fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/p\"}";                check "Stop 的 kind 是 done" "$(kind_of)" "done"
+fire AskUserQuestion "{\"session_id\":\"$(sid n018)\",\"cwd\":\"/x/p\"}"; check "AskUserQuestion 的 kind 是 question" "$(kind_of)" "question"
+fire StopFailure "{\"session_id\":\"$(sid n019)\",\"cwd\":\"/x/p\"}";     check "StopFailure 的 kind 是 error" "$(kind_of)" "error"
+fire Notification "{\"session_id\":\"$(sid n020)\",\"cwd\":\"/x/p\",\"notification_type\":\"permission_prompt\"}"
+check "权限提示的 kind 是 permission" "$(kind_of)" "permission"
+
+# Leave the environment as the rest of the suite expects it.
+unset TAILBELL_CHANNELS TAILBELL_NTFY_TOPIC TAILBELL_NTFY_SERVER \
+      TAILBELL_SLACK_WEBHOOK TAILBELL_DISCORD_WEBHOOK TAILBELL_FEISHU_WEBHOOK \
+      TAILBELL_CURL FAKE_CURL_RECORD TAILBELL_SYNC
 
 ########################################################################
 echo

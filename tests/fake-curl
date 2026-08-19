@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# A curl that records the request instead of making it.
+#
+# This exists so every delivery channel can be tested — URL, method, headers and
+# body — with the network unplugged. `tests/run-tests.sh` must never need to
+# reach the internet: a suite that fails on a train is a suite people stop
+# running, and release 8's guardrails say so explicitly.
+#
+# Point TAILBELL_CURL at this file. It writes one block per call to
+# $FAKE_CURL_RECORD and prints whatever the real curl would have printed for
+# `-w %{http_code}`.
+#
+# Knobs, for the failure paths:
+#   FAKE_CURL_CODE   HTTP status to report      (default 200)
+#   FAKE_CURL_EXIT   exit status to return      (default 0)
+#   FAKE_CURL_SLEEP  seconds to stall           (default 0) — used to prove the
+#                    hook returns without waiting for a slow channel
+set -u
+
+REC="${FAKE_CURL_RECORD:-/dev/null}"
+CODE="${FAKE_CURL_CODE:-200}"
+RC="${FAKE_CURL_EXIT:-0}"
+SLEEP="${FAKE_CURL_SLEEP:-0}"
+
+url=""; body=""; method="GET"; proxy=""; headers=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H)               headers="$headers
+HEADER $2"; shift 2 ;;
+    --data-binary|-d) body="$2"; shift 2 ;;
+    --proxy|-x)       proxy="$2"; shift 2 ;;
+    -X)               method="$2"; shift 2 ;;
+    -m|-o|-w|--max-time|--output|--write-out) shift 2 ;;
+    -*)               shift ;;          # -s, -S, -sS and friends carry no value
+    *)                url="$1"; shift ;;
+  esac
+done
+
+{
+  printf 'CALL\n'
+  printf 'METHOD %s\n' "$method"
+  printf 'URL %s\n' "$url"
+  [ -n "$proxy" ] && printf 'PROXY %s\n' "$proxy"
+  [ -n "$headers" ] && printf '%s\n' "${headers#
+}"
+  printf 'BODY %s\n' "$body"
+  printf 'END\n'
+} >> "$REC" 2>/dev/null
+
+[ "$SLEEP" = "0" ] || sleep "$SLEEP"
+printf '%s' "$CODE"
+exit "$RC"

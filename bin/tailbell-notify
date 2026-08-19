@@ -7,11 +7,13 @@
 # ---------------------------------------------------------------------------
 # Which events we listen to, and why these
 #
-# In the VS Code extension's chat panel the `Notification` and `PermissionRequest`
-# hooks never fire — measured on extension 2.1.220: 0 fires each, against 787 for
-# PreToolUse in the same session (upstream anthropics/claude-code #80530, #31285,
-# #13203; root cause #80110 — the extension passes --permission-prompt-tool stdio,
-# which bypasses the event). They DO fire in the terminal CLI.
+# In the VS Code extension's chat panel the `Notification` hook never fires —
+# measured 0 times over three weeks, against 787 for PreToolUse in one session
+# (upstream anthropics/claude-code #80530, #31285, #13203; root cause #80110 —
+# the extension passes --permission-prompt-tool stdio, which bypasses the event).
+# It DOES fire in the terminal CLI. `PermissionRequest` fires in the panel, but
+# only ever for AskUserQuestion — never for a tool permission prompt. See
+# docs/architecture.md §1, which records both windows of measurement.
 #
 # So the signal is built from events that fire everywhere:
 #   UserPromptSubmit            -> remember when this turn started
@@ -21,23 +23,31 @@
 # permission-prompt case the chat panel cannot report.
 #
 # ---------------------------------------------------------------------------
-# Transport (TAILBELL_TRANSPORT)
+# Channels (TAILBELL_CHANNELS)
 #
-#   file  - append a JSON line to $TAILBELL_LOG. A listener on the workstation
-#           tails it over the SSH connection the editor already holds open. No
-#           network call, no third-party service, no quota. On a cluster whose
-#           $HOME is shared NFS this also works from compute nodes, and one
-#           listener covers every login node.
-#   ntfy  - POST to an ntfy server. Reaches you when no SSH session is up, at the
-#           cost of a third party seeing project names.
+# A comma-separated list, each name resolving to a `sink_<name>` function with
+# one signature. Adding a channel is a row in that table and a row in the
+# doctor's, never a new branch in the event logic below.
 #
-# On macOS neither applies: Claude Code is already on the user's screen, so the
-# notification is raised locally.
+#   desktop - draw it here and now, via tailbell-show. macOS only, and the only
+#             sensible default there: Claude Code is already on the user's screen.
+#   file    - append a JSON line to $TAILBELL_LOG. A listener on the workstation
+#             tails it over the SSH connection the editor already holds open. No
+#             network call, no third party, no quota. On a cluster whose $HOME is
+#             shared NFS this also works from compute nodes, and one listener
+#             covers every login node. This is release 0's guaranteed path.
+#   ntfy    - POST to an ntfy server.
+#   slack / discord / feishu - POST to an incoming webhook.
+#
+# Everything after `file` reaches you with no SSH session up, at the cost of a
+# third party seeing project names. All of it is optional and off by default:
+# with TAILBELL_CHANNELS unset, this script does exactly what release 0 did.
 #
 # ---------------------------------------------------------------------------
-# Privacy: only the project directory name, the host name and an event label are
-# ever emitted. The Stop payload contains `last_assistant_message` — the entire
-# reply text — and it is deliberately never read.
+# Privacy: only the project directory name, the host name, an event label and a
+# tool name are ever emitted. Two payload fields are the whole conversation and
+# are deliberately never read: `Stop.last_assistant_message` (the entire reply)
+# and `PermissionRequest.tool_input` (the full question text, for AskUserQuestion).
 set -u
 
 EVENT="${1:-?}"
@@ -51,9 +61,33 @@ DEBUG="${TAILBELL_DEBUG_LOG:-$TAILBELL_HOME/debug.log}"
 STATE_DIR="${TAILBELL_STATE_DIR:-$TAILBELL_HOME/state}"
 # Turns shorter than this mean you are almost certainly still watching the screen.
 MIN_SECS="${TAILBELL_MIN_SECONDS:-60}"
+
+# Channel list. Unset is the point: it must resolve to what this machine did
+# before channels existed, so an upgrade changes nothing for anyone.
+CHANNELS="${TAILBELL_CHANNELS:-}"
+if [ -z "$CHANNELS" ]; then
+  if [ "$(uname)" = "Darwin" ]; then CHANNELS="desktop"; else CHANNELS="$TRANSPORT"; fi
+fi
+
+# The curl seam. Tests point this at a recorder, which is how every channel is
+# covered without the suite ever needing the network.
+CURL="${TAILBELL_CURL:-curl}"
+HTTP_TIMEOUT="${TAILBELL_HTTP_TIMEOUT:-8}"
+# curl reads http_proxy on its own, which is what makes a channel work from
+# inside an sbatch job on a compute node. This is only for overriding a preset
+# one that is wrong.
+HTTP_PROXY_OPT="${TAILBELL_HTTP_PROXY:-}"
+# Network sinks are backgrounded, because three channels at an 8 s timeout is 24 s
+# of stalled Stop hook. The doctor and the tests set this to 1 to get determinism.
+SYNC="${TAILBELL_SYNC:-0}"
+
 NTFY_TOPIC="${TAILBELL_NTFY_TOPIC:-}"
 NTFY_SERVER="${TAILBELL_NTFY_SERVER:-https://ntfy.sh}"
 NTFY_TOKEN="${TAILBELL_NTFY_TOKEN:-}"
+SLACK_WEBHOOK="${TAILBELL_SLACK_WEBHOOK:-}"
+DISCORD_WEBHOOK="${TAILBELL_DISCORD_WEBHOOK:-}"
+FEISHU_WEBHOOK="${TAILBELL_FEISHU_WEBHOOK:-}"
+FEISHU_SECRET="${TAILBELL_FEISHU_SECRET:-}"
 
 mkdir -p "$STATE_DIR" 2>/dev/null
 
@@ -120,57 +154,175 @@ owning_app() {
 }
 app="$(owning_app)"
 
-emit() { # emit <title> <message> <tags> <priority>
-  if [ "$(uname)" = "Darwin" ]; then
-    local urgent=""; [ "$4" = "high" ] && urgent="urgent"
-    local show="$TAILBELL_HOME/bin/tailbell-show"
-    [ -x "$show" ] || show="$(dirname "$0")/tailbell-show"
-    if [ -x "$show" ]; then
-      # $proj is passed separately from the title so the display layer can match
-      # it against editor window titles and focus the right window on click.
-      "$show" "$1" "$2" "$urgent" "$proj" "$app" "$entrypoint"
-      dbg "SHOWN locally: $1"
-    else
-      /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
-      dbg "SHOWN via osascript: $1"
-    fi
-    return
-  fi
+########################################################################
+# The channel table
+#
+# Every sink takes the same five arguments:
+#   sink_<name> <kind> <title> <message> <tags> <priority>
+# and is responsible for logging its own outcome. A sink that fails must never
+# prevent the next one from running — that is why emit() calls each one
+# unconditionally rather than chaining on success.
+########################################################################
 
-  case "$TRANSPORT" in
-    file)
-      # jq builds the line so a quote or newline in a project name cannot produce
-      # malformed JSON; flock stops concurrent sessions from interleaving writes.
-      if jq -nc --arg t "$1" --arg m "$2" --arg p "$4" --arg j "$proj" --arg n "$node" \
-                --arg a "$app" --arg e "$entrypoint" \
-           '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n,
-             app:$a, entrypoint:$e}' \
-          | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1; then
-        dbg "EMITTED to $LOGFILE: $1"
-      else
-        dbg "FAILED writing $LOGFILE"
-      fi
-      if [ "$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)" -gt 1048576 ]; then
-        tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE"
-      fi
-      ;;
-    ntfy)
-      if [ -z "$NTFY_TOPIC" ]; then dbg "ABORT: transport=ntfy but no topic configured"; return; fi
-      local auth=()
-      [ -n "$NTFY_TOKEN" ] && auth=(-H "Authorization: Bearer $NTFY_TOKEN")
-      # Compute nodes have no direct route out, but ARC presets http_proxy and
-      # curl honours it, so the same call works from inside a batch job.
-      if curl -sS -m 8 "${auth[@]}" -H "Title: $1" -H "Tags: $3" -H "Priority: $4" \
-              -d "$2" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null 2>&1; then
-        dbg "EMITTED to ntfy: $1"
-      else
-        dbg "FAILED posting to ntfy"
-      fi
-      ;;
-    *)
-      dbg "ABORT: unknown transport '$TRANSPORT'"
-      ;;
+# ntfy takes 1..5; the record keeps the word, because the listener and the
+# renderer key on "high" to decide whether an alert persists.
+prio_number() { case "$1" in high) echo 4 ;; low) echo 2 ;; *) echo 3 ;; esac; }
+
+# One HTTP POST, with the outcome named in debug.log rather than swallowed.
+#   http_post <label> <url> <content-type> <body> [extra header...]
+# `${arr[@]+"${arr[@]}"}` rather than plain "${arr[@]}": under `set -u` an empty
+# array expansion is an error on bash 3.2, which is what /bin/bash still is on
+# macOS. This script runs there too.
+http_post() {
+  local label="$1" url="$2" ctype="$3" body="$4"; shift 4
+  local extra=() proxy=() h code rc
+  for h in "$@"; do extra+=(-H "$h"); done
+  [ -n "$HTTP_PROXY_OPT" ] && proxy=(--proxy "$HTTP_PROXY_OPT")
+  if ! command -v "$CURL" >/dev/null 2>&1 && [ ! -x "$CURL" ]; then
+    dbg "FAILED $label: curl not on PATH"
+    return 1
+  fi
+  code="$("$CURL" -sS -o /dev/null -w '%{http_code}' -m "$HTTP_TIMEOUT" \
+          ${proxy[@]+"${proxy[@]}"} -X POST \
+          -H "Content-Type: $ctype" ${extra[@]+"${extra[@]}"} \
+          --data-binary "$body" "$url" 2>/dev/null)"
+  rc=$?
+  case "$code" in
+    2*) dbg "EMITTED to $label (HTTP $code)"; return 0 ;;
+    *)  dbg "FAILED $label: HTTP ${code:-none}, curl exit $rc"; return 1 ;;
   esac
+}
+
+sink_desktop() { # macOS only: there is nothing to transport, draw it here.
+  local kind="$1" title="$2" msg="$3" prio="$5"
+  local urgent=""; [ "$prio" = "high" ] && urgent="urgent"
+  local show="$TAILBELL_HOME/bin/tailbell-show"
+  [ -x "$show" ] || show="$(dirname "$0")/tailbell-show"
+  if [ -x "$show" ]; then
+    # $proj is passed separately from the title so the display layer can match
+    # it against editor window titles and focus the right window on click.
+    "$show" "$title" "$msg" "$urgent" "$proj" "$app" "$entrypoint" "$kind"
+    dbg "SHOWN locally: $title"
+  else
+    /usr/bin/osascript -e "display notification \"$msg\" with title \"$title\"" >/dev/null 2>&1
+    dbg "SHOWN via osascript: $title"
+  fi
+}
+
+sink_file() { # release 0's path: one JSON line on the shared NFS home.
+  local kind="$1" title="$2" msg="$3" prio="$5"
+  # jq builds the line so a quote or newline in a project name cannot produce
+  # malformed JSON; flock stops concurrent sessions from interleaving writes.
+  if jq -nc --arg t "$title" --arg m "$msg" --arg p "$prio" --arg j "$proj" \
+            --arg n "$node" --arg a "$app" --arg e "$entrypoint" --arg k "$kind" \
+       '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n,
+         app:$a, entrypoint:$e, kind:$k}' \
+      | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1; then
+    dbg "EMITTED to $LOGFILE: $title"
+  else
+    dbg "FAILED writing $LOGFILE"
+  fi
+  if [ "$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+    tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE"
+  fi
+}
+
+sink_ntfy() {
+  local kind="$1" title="$2" msg="$3" tags="$4" prio="$5"
+  if [ -z "$NTFY_TOPIC" ]; then
+    dbg "SKIPPED ntfy: no TAILBELL_NTFY_TOPIC configured"; return 1
+  fi
+  # The JSON publishing API, not the headers-plus-body form the first version
+  # used. Title and tags are CJK here, and an HTTP header is officially
+  # ISO-8859-1 — putting 完成 in one is asking for a mangled title. A JSON body
+  # is UTF-8 by definition.
+  local body
+  body="$(jq -nc --arg topic "$NTFY_TOPIC" --arg t "$title" --arg m "$msg" \
+                 --arg tag "$tags" --argjson p "$(prio_number "$prio")" \
+            '{topic:$topic, title:$t, message:$m, tags:[$tag], priority:$p}')" || {
+    dbg "FAILED ntfy: could not build body"; return 1; }
+  local auth=()
+  [ -n "$NTFY_TOKEN" ] && auth=("Authorization: Bearer $NTFY_TOKEN")
+  http_post ntfy "$NTFY_SERVER" "application/json" "$body" ${auth[@]+"${auth[@]}"}
+}
+
+sink_slack() {
+  local title="$2" msg="$3"
+  if [ -z "$SLACK_WEBHOOK" ]; then
+    dbg "SKIPPED slack: no TAILBELL_SLACK_WEBHOOK configured"; return 1
+  fi
+  local body
+  body="$(jq -nc --arg t "$title" --arg m "$msg" '{text:($t + "\n" + $m)}')" || {
+    dbg "FAILED slack: could not build body"; return 1; }
+  http_post slack "$SLACK_WEBHOOK" "application/json" "$body"
+}
+
+sink_discord() {
+  local title="$2" msg="$3"
+  if [ -z "$DISCORD_WEBHOOK" ]; then
+    dbg "SKIPPED discord: no TAILBELL_DISCORD_WEBHOOK configured"; return 1
+  fi
+  local body
+  body="$(jq -nc --arg t "$title" --arg m "$msg" '{content:($t + "\n" + $m)}')" || {
+    dbg "FAILED discord: could not build body"; return 1; }
+  http_post discord "$DISCORD_WEBHOOK" "application/json" "$body"
+}
+
+sink_feishu() {
+  local title="$2" msg="$3"
+  if [ -z "$FEISHU_WEBHOOK" ]; then
+    dbg "SKIPPED feishu: no TAILBELL_FEISHU_WEBHOOK configured"; return 1
+  fi
+  local body ts sign url="$FEISHU_WEBHOOK"
+  if [ -n "$FEISHU_SECRET" ]; then
+    # Feishu's "signed request" mode: base64(HMAC-SHA256(key="<ts>\n<secret>",
+    # message="")). Sending unsigned to a bot that requires a signature is
+    # rejected server-side, so a missing openssl is a hard stop with a reason,
+    # not a request that quietly bounces.
+    if ! command -v openssl >/dev/null 2>&1; then
+      dbg "FAILED feishu: TAILBELL_FEISHU_SECRET set but openssl is not installed"
+      return 1
+    fi
+    ts="$(date +%s)"
+    sign="$(printf '' | openssl dgst -sha256 -hmac "$ts
+$FEISHU_SECRET" -binary 2>/dev/null | openssl base64 2>/dev/null | tr -d '\n')"
+    body="$(jq -nc --arg t "$title" --arg m "$msg" --arg ts "$ts" --arg s "$sign" \
+              '{timestamp:$ts, sign:$s, msg_type:"text",
+                content:{text:($t + "\n" + $m)}}')" || {
+      dbg "FAILED feishu: could not build body"; return 1; }
+  else
+    body="$(jq -nc --arg t "$title" --arg m "$msg" \
+              '{msg_type:"text", content:{text:($t + "\n" + $m)}}')" || {
+      dbg "FAILED feishu: could not build body"; return 1; }
+  fi
+  http_post feishu "$url" "application/json" "$body"
+}
+
+# Network sinks run detached unless asked not to. stdin/stdout/stderr are closed
+# first: leaving them attached would keep the pipe Claude Code reads open after
+# this script exits, so the hook would appear to hang for as long as curl does.
+run_net() {
+  if [ "$SYNC" = "1" ]; then
+    "$@"
+  else
+    ( "$@" </dev/null >/dev/null 2>&1 & )
+  fi
+}
+
+emit() { # emit <kind> <title> <message> <tags> <priority>
+  local ch had=0
+  for ch in $(printf '%s' "$CHANNELS" | tr ',' ' '); do
+    case "$ch" in
+      desktop) had=1; sink_desktop "$@" ;;
+      file)    had=1; sink_file    "$@" ;;
+      ntfy)    had=1; run_net sink_ntfy    "$@" ;;
+      slack)   had=1; run_net sink_slack   "$@" ;;
+      discord) had=1; run_net sink_discord "$@" ;;
+      feishu)  had=1; run_net sink_feishu  "$@" ;;
+      *)       dbg "ABORT: unknown channel '$ch' (checked: desktop file ntfy slack discord feishu)" ;;
+    esac
+  done
+  [ "$had" = 1 ] || dbg "ABORT: no usable channel in '$CHANNELS'"
 }
 
 case "$EVENT" in
@@ -182,7 +334,7 @@ case "$EVENT" in
   AskUserQuestion)
     # Claude is about to block on a multiple-choice question. Always worth a ping
     # regardless of elapsed time: this is the expensive dead-time case.
-    emit "❓ $proj · 在等你回答" "Claude Code 有问题要问你 · $node (#$short)" "question" "high"
+    emit question "❓ $proj · 在等你回答" "Claude Code 有问题要问你 · $node (#$short)" "question" "high"
     ;;
 
   Notification)
@@ -192,9 +344,9 @@ case "$EVENT" in
     ntype="$(get .notification_type)"
     case "$ntype" in
       permission_prompt)
-        emit "🔑 $proj · 需要你授权" "Claude Code 在等一个权限决定 · $node (#$short)" "key" "high" ;;
+        emit permission "🔑 $proj · 需要你授权" "Claude Code 在等一个权限决定 · $node (#$short)" "key" "high" ;;
       idle_prompt)
-        emit "💤 $proj · 在等你输入" "Claude Code 空闲等待 · $node (#$short)" "zzz" "default" ;;
+        emit idle "💤 $proj · 在等你输入" "Claude Code 空闲等待 · $node (#$short)" "zzz" "default" ;;
       *)
         dbg "ignored notification_type='$ntype'" ;;
     esac
@@ -220,7 +372,7 @@ case "$EVENT" in
     elif [ "$elapsed" -ge 3600 ]; then human="跑了 $((elapsed/3600))h$((elapsed%3600/60))m"
     elif [ "$elapsed" -ge 60 ];   then human="跑了 $((elapsed/60))m$((elapsed%60))s"
     else                               human="跑了 ${elapsed}s"; fi
-    emit "✅ $proj · 完成" "$human · $node (#$short)" "white_check_mark" "default"
+    emit done "✅ $proj · 完成" "$human · $node (#$short)" "white_check_mark" "default"
     ;;
 
   StopFailure)
@@ -228,13 +380,13 @@ case "$EVENT" in
     # elapsed-time gate exists to avoid interrupting you over a quick success,
     # and a failure is never a quick success.
     rm -f "$startf"
-    emit "⚠️ $proj · 中断" "这一轮因错误结束 · $node (#$short)" "warning" "high"
+    emit error "⚠️ $proj · 中断" "这一轮因错误结束 · $node (#$short)" "warning" "high"
     ;;
 
   Elicitation)
     # An MCP server is asking for input mid-tool-call: blocked on you, so worth a
     # ping however long the turn has run.
-    emit "❓ $proj · 工具在等你输入" "MCP 请求输入 · $node (#$short)" "question" "high"
+    emit question "❓ $proj · 工具在等你输入" "MCP 请求输入 · $node (#$short)" "question" "high"
     ;;
 
   SessionEnd)
