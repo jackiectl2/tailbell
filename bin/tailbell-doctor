@@ -229,10 +229,43 @@ if [ "$(uname)" = "Darwin" ]; then
     note "监听器有错误输出,最后 5 行:"; tail -5 /tmp/tailbell.err | sed 's/^/       /'
   else pass "监听器无错误输出"; fi
 
+  sect "声音"
+  if [ "${TAILBELL_SOUND:-1}" = "0" ]; then note "TAILBELL_SOUND=0 —— 所有提示音已关"
+  else
+    miss=""
+    for snd in "${TAILBELL_SOUND_DONE:-Glass}" "${TAILBELL_SOUND_QUESTION:-Ping}" \
+               "${TAILBELL_SOUND_PERMISSION:-Sosumi}" "${TAILBELL_SOUND_ERROR:-Basso}" \
+               "${TAILBELL_SOUND_IDLE:-Tink}"; do
+      [ -f "/System/Library/Sounds/$snd.aiff" ] || miss="$miss $snd"
+    done
+    if [ -n "$miss" ]; then fail "这些声音文件不存在:$miss —— 看 /System/Library/Sounds 里有什么"
+    else pass "五种事件各有各的提示音,文件都在"; fi
+  fi
+  case "${TAILBELL_VOICE:-0}" in
+    0) note "语音播报关着 (默认)。想开:TAILBELL_VOICE=question,permission" ;;
+    *) if [ -z "${TAILBELL_VOICE_NAME:-}" ]; then
+         note "开了语音但没指定 TAILBELL_VOICE_NAME —— 提示语是中文,系统默认嗓音多半是英文的,念不好。试 Tingting"
+       else pass "语音播报:${TAILBELL_VOICE_NAME}"; fi ;;
+  esac
+
   if [ "$TEST" = 1 ]; then
     sect "实测"
-    "$SELFDIR/tailbell-show" "🩺 tailbell 自查" "看到这条说明显示层正常" urgent "" \
+    "$SELFDIR/tailbell-show" "🩺 tailbell 自查" "看到这条说明显示层正常" urgent "" "" "" done \
       && pass "已触发 —— 现在看屏幕"
+
+    # "Distinguishable with the screen turned away" is not something a script can
+    # assert; it is something you listen to. So play them, spaced out, and let
+    # the person decide.
+    if [ "${TAILBELL_SOUND:-1}" != "0" ] && [ -x /usr/bin/afplay ]; then
+      echo "     现在依次播放三种提示音 —— 把头转开听,应该能分辨:"
+      for pair in "完成:${TAILBELL_SOUND_DONE:-Glass}" \
+                  "在等你回答:${TAILBELL_SOUND_QUESTION:-Ping}" \
+                  "需要授权:${TAILBELL_SOUND_PERMISSION:-Sosumi}"; do
+        printf '       %s (%s)\n' "${pair%%:*}" "${pair##*:}"
+        /usr/bin/afplay "/System/Library/Sounds/${pair##*:}.aiff" 2>/dev/null
+        sleep 1
+      done
+    fi
   fi
 
 else

@@ -361,6 +361,95 @@ unset TAILBELL_CHANNELS TAILBELL_NTFY_TOPIC TAILBELL_NTFY_SERVER \
 
 ########################################################################
 echo
+echo "── 声音与语音 ──"
+#
+# tailbell-show is macOS code, and this suite runs on the cluster. What IS
+# testable here is every decision it makes before touching a Mac API: which
+# sound each event kind picks, whether it plays one at all, and whether Focus
+# suppresses it. Those are the parts that have logic in them. The Mac APIs
+# themselves are stubbed through TAILBELL_OSASCRIPT / TAILBELL_AFPLAY /
+# TAILBELL_SAY, the same seam idea as TAILBELL_CURL.
+#
+# ⚠️ What this does NOT prove: that the sounds are distinguishable, or that the
+# Focus detection reads the right plist on any given macOS. Both are marked
+# untested in the docs, and docs/MIGRATION.md records what that blindness cost
+# last time.
+
+SHOW="$REPO/bin/tailbell-show"
+SH="$TMP/showhome"; mkdir -p "$SH"
+STUB="$TMP/stubs"; mkdir -p "$STUB"
+for prog in osascript afplay say; do
+  cat > "$STUB/$prog" <<STUBEOF
+#!/usr/bin/env bash
+printf '$prog %s\n' "\$*" >> "$TMP/render.log"
+exit 0
+STUBEOF
+  chmod +x "$STUB/$prog"
+done
+
+# draw <kind> [env assignments...] -> what the renderer would have run
+draw() {
+  local k="$1"; shift
+  : > "$TMP/render.log"
+  env TAILBELL_HOME="$SH" TAILBELL_RENDERER=osascript \
+      TAILBELL_OSASCRIPT="$STUB/osascript" TAILBELL_AFPLAY="$STUB/afplay" \
+      TAILBELL_SAY="$STUB/say" "$@" \
+      bash "$SHOW" "标题" "正文" "" "proj" "" "" "$k" >/dev/null 2>&1
+  # `say` is backgrounded so it never delays the alert; give it a moment to land.
+  sleep 0.3
+  cat "$TMP/render.log" 2>/dev/null
+}
+
+check "done 用 Glass"        "$(draw done       | grep -o 'sound name "[A-Za-z]*"')" 'sound name "Glass"'
+check "question 用 Ping"     "$(draw question   | grep -o 'sound name "[A-Za-z]*"')" 'sound name "Ping"'
+check "permission 用 Sosumi" "$(draw permission | grep -o 'sound name "[A-Za-z]*"')" 'sound name "Sosumi"'
+check "error 用 Basso"       "$(draw error      | grep -o 'sound name "[A-Za-z]*"')" 'sound name "Basso"'
+check "idle 用 Tink"         "$(draw idle       | grep -o 'sound name "[A-Za-z]*"')" 'sound name "Tink"'
+# An event kind we have not invented yet must still make a noise, not fall silent.
+check "没见过的 kind 退回默认音" "$(draw whatever | grep -o 'sound name "[A-Za-z]*"')" 'sound name "Glass"'
+
+check "单个声音可以覆盖" \
+  "$(draw done TAILBELL_SOUND_DONE=Submarine | grep -o 'sound name "[A-Za-z]*"')" \
+  'sound name "Submarine"'
+
+# One config line silences everything — the brief's requirement.
+if draw done TAILBELL_SOUND=0 | grep -q 'sound name'; then no "TAILBELL_SOUND=0 没能静音"
+else ok "TAILBELL_SOUND=0 一行静音"; fi
+if draw done TAILBELL_SOUND=0 | grep -q 'osascript'; then ok "静音后通知照常弹出"
+else no "静音把通知本身也弄没了"; fi
+
+# Voice is off unless asked for: a machine that talks in a shared office is a
+# different product.
+if draw done | grep -q '^say '; then no "语音默认是开的"
+else ok "语音默认关闭"; fi
+if draw done TAILBELL_VOICE=1 | grep -q '^say '; then ok "TAILBELL_VOICE=1 会念出来"
+else no "TAILBELL_VOICE=1 没念"; fi
+check "只念被指定的 kind (question)" \
+  "$(draw question TAILBELL_VOICE=question,permission | grep -c '^say ')" "1"
+check "没被指定的 kind 不念 (done)" \
+  "$(draw done TAILBELL_VOICE=question,permission | grep -c '^say ')" "0"
+
+# Never the message text — same rule as the webhooks.
+# Only the `say` line, not the whole render log — the notification itself
+# carries the message, and that is fine; the spoken line must not.
+if draw done TAILBELL_VOICE=1 | grep '^say ' | grep -q '正文'; then
+  no "语音把正文念出去了"
+else ok "语音只念项目和事件,不念正文"; fi
+
+# Focus is a choice the user made. The notification respects it by way of macOS;
+# `say` would not unless we check.
+if draw done TAILBELL_VOICE=1 TAILBELL_FOCUS_CMD=true | grep -q '^say '; then
+  no "专注模式开着还在念"
+else ok "专注模式开着就不念 (不绕过 DND)"; fi
+if draw done TAILBELL_VOICE=1 TAILBELL_FOCUS_CMD=false | grep -q '^say '; then
+  ok "专注模式关着照常念"
+else no "专注模式关着却不念"; fi
+if draw done TAILBELL_VOICE=1 TAILBELL_FOCUS_CMD=true TAILBELL_RESPECT_FOCUS=0 | grep -q '^say '; then
+  ok "TAILBELL_RESPECT_FOCUS=0 时明确地绕过 DND"
+else no "关掉 RESPECT_FOCUS 也没生效"; fi
+
+########################################################################
+echo
 echo "── 手机审批 ──"
 #
 # tests/fake-curl doubles as the phone here: when it sees a POST carrying ntfy

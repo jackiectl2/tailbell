@@ -57,7 +57,8 @@ fi
 
 echo "==> 3/6 安装到 $TB"
 mkdir -p "$TB/bin" "$TB/state"
-for f in tailbell-notify tailbell-show tailbell-listen tailbell-doctor tailbell-register; do
+for f in tailbell-notify tailbell-show tailbell-listen tailbell-doctor \
+         tailbell-register tailbell-approve; do
   install -m 755 "$REPO/bin/$f" "$TB/bin/$f"
 done
 if [ ! -f "$TB/config" ]; then
@@ -65,7 +66,28 @@ if [ ! -f "$TB/config" ]; then
     '# tailbell workstation config. Rendering happens locally, so no transport.' \
     'TAILBELL_MIN_SECONDS=60' \
     '# Uncomment if you keep SSH masters to machines unrelated to Claude Code:' \
-    '#TAILBELL_HOST_PATTERN="arc-ts"' > "$TB/config"
+    '#TAILBELL_HOST_PATTERN="arc-ts"' \
+    '' \
+    '# Sound. Each event kind gets its own, so you can tell "it finished" from' \
+    '# "it needs you" without looking. All five ship with macOS.' \
+    '#TAILBELL_SOUND=1                  # 0 silences every one of them' \
+    '#TAILBELL_SOUND_DONE=Glass' \
+    '#TAILBELL_SOUND_QUESTION=Ping' \
+    '#TAILBELL_SOUND_PERMISSION=Sosumi' \
+    '#TAILBELL_SOUND_ERROR=Basso' \
+    '#TAILBELL_SOUND_IDLE=Tink' \
+    '' \
+    '# Spoken announcement. Off by default — a machine that talks out loud in a' \
+    '# shared office is a different product. 1 speaks every kind; a list speaks' \
+    '# only those, and "question,permission" is the useful setting: speak when' \
+    '# something is waiting on you, stay quiet when something merely finished.' \
+    '# Only the project name and what happened are ever spoken, never the text.' \
+    '#TAILBELL_VOICE=0' \
+    '#TAILBELL_VOICE_NAME=Tingting      # the prompts are Chinese; pick a voice that reads it' \
+    '' \
+    '# Do Not Disturb / Focus is a choice you made, so sound and speech are held' \
+    '# back while one is on. Set to 0 only if you mean to override it.' \
+    '#TAILBELL_RESPECT_FOCUS=1' > "$TB/config"
   chmod 600 "$TB/config"
   echo "    写入 $TB/config"
 else
