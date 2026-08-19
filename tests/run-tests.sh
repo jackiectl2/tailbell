@@ -574,6 +574,74 @@ else no "重装把 config 覆盖了"; fi
 
 ########################################################################
 echo
+echo "── 监听器 ──"
+#
+# Everything tailbell-listen does goes through ssh, which is why it had no tests
+# at all. tests/fake-ssh answers the three questions the listener asks — is the
+# master alive, which cluster is this host, give me the stream — from a script.
+# tests/fake-show records what it was told to draw.
+
+LH="$TMP/listenhome"; mkdir -p "$LH/.ssh"
+# Discovery is by ControlMaster socket name, so two sockets is two candidate
+# hosts. Both belong to one cluster here, which is the case that used to produce
+# duplicate notifications.
+touch "$LH/.ssh/cm-ctlang@gl-login4-22" "$LH/.ssh/cm-ctlang@gl-login6-22"
+
+cat > "$TMP/fake-show" <<'FSHOW'
+#!/usr/bin/env bash
+printf 'SHOW|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$TMP_SHOW_LOG"
+FSHOW
+chmod +x "$TMP/fake-show"
+
+cat > "$TMP/events.ndjson" <<'EVJSON'
+{"ts":1000,"title":"✅ p · 完成","message":"跑了 5m","priority":"default","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"done"}
+{"ts":1000,"title":"✅ p · 完成","message":"跑了 5m","priority":"default","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"done"}
+{"ts":1001,"title":"❓ p · 在等你回答","message":"问题","priority":"high","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"question"}
+not json at all, must not crash the stream
+EVJSON
+
+SHOWLOG="$TMP/show.log"; : > "$SHOWLOG"
+# Only in the environment of the runs below — mutating the suite's own PATH
+# would put a fake ssh in front of every later case.
+mkdir -p "$TMP/fakebin"; cp "$REPO/tests/fake-ssh" "$TMP/fakebin/ssh"
+HOME="$LH" TMP_SHOW_LOG="$SHOWLOG" TAILBELL_SHOW="$TMP/fake-show" \
+  FAKE_SSH_EVENTS="$TMP/events.ndjson" \
+  FAKE_SSH_CLUSTER_gl_login4="cluster-A" FAKE_SSH_CLUSTER_gl_login6="cluster-A" \
+  PATH="$TMP/fakebin:$PATH" \
+  timeout 8 /usr/bin/python3 "$REPO/bin/tailbell-listen" >/dev/null 2>&1
+shown=$(grep -c '^SHOW|' "$SHOWLOG" 2>/dev/null); shown=${shown:-0}
+
+# Two identical records and one distinct one, from two hosts of the SAME cluster
+# whose $HOME is the same file. Anything above 2 means the duplicate-suppression
+# or the one-stream-per-cluster rule has regressed — connecting to gl1..gl6 used
+# to mean six copies of every notification.
+check "同集群两个连接只出一份通知" "$shown" "2"
+
+# kind is the seventh argument and the renderer picks a sound from it. A listener
+# that drops it makes every event sound the same.
+if grep -q 'SHOW|❓ p · 在等你回答|.*|question$' "$SHOWLOG"; then ok "kind 透传给渲染层"
+else no "kind 没传给渲染层 (声音会全都一样)"; fi
+if grep -q '^SHOW|✅ p · 完成|.*|done$' "$SHOWLOG"; then ok "done 事件的 kind 也对"
+else no "done 事件的 kind 不对"; fi
+# high priority becomes the "urgent" flag the renderer keys on.
+if grep -q '^SHOW|❓ p · 在等你回答|问题|urgent|' "$SHOWLOG"; then ok "high 优先级映射成 urgent"
+else no "high 优先级没映射成 urgent"; fi
+# A truncated or interleaved line on a shared NFS file must not end the stream.
+if grep -q 'not json' "$SHOWLOG"; then no "非 JSON 的行被当成事件了"
+else ok "非 JSON 的行被跳过,流不中断"; fi
+
+# A host where tailbell was never installed has no cluster-id. Tailing it would
+# create state there and stream nothing, so it must be skipped entirely.
+: > "$SHOWLOG"
+HOME="$LH" TMP_SHOW_LOG="$SHOWLOG" TAILBELL_SHOW="$TMP/fake-show" \
+  FAKE_SSH_EVENTS="$TMP/events.ndjson" \
+  PATH="$TMP/fakebin:$PATH" \
+  timeout 6 /usr/bin/python3 "$REPO/bin/tailbell-listen" >/dev/null 2>&1
+n=$(grep -c '^SHOW|' "$SHOWLOG" 2>/dev/null); n=${n:-0}
+check "没装 tailbell 的主机被跳过" "$n" "0"
+
+########################################################################
+echo
 echo "── 打包与入口 ──"
 
 TB="$REPO/bin/tailbell"

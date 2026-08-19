@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# An ssh that answers from a script instead of connecting anywhere.
+#
+# tailbell-listen had no test coverage at all, because everything it does goes
+# through ssh — docs/MIGRATION.md flagged this as needed and it stayed unwritten.
+# This stands in for the three things the listener asks ssh to do:
+#
+#   ssh -O check <host>              is the master alive?
+#   ssh <host> cat ~/.tailbell/...   which cluster is this host on?
+#   ssh <host> tail -F ...           stream events
+#
+# Knobs:
+#   FAKE_SSH_CLUSTER_<host>  cluster id to report for that host, with dots and
+#                            hyphens replaced by underscores. Unset means
+#                            "tailbell is not installed there", which the
+#                            listener must treat as a host to skip.
+#   FAKE_SSH_EVENTS          file of JSON lines to stream, once, then EOF.
+set -u
+
+# -O check comes first and takes no remote command.
+for a in "$@"; do
+  [ "$a" = "check" ] && exit 0
+done
+
+host=""; cmd=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -*) shift ;;
+    *)  if [ -z "$host" ]; then host="$1"; else cmd="$cmd $1"; fi; shift ;;
+  esac
+done
+
+case "$cmd" in
+  *cluster-id*)
+    var="FAKE_SSH_CLUSTER_$(printf '%s' "$host" | tr '.-' '__')"
+    eval "val=\${$var:-}"
+    [ -n "$val" ] || exit 1        # not installed there
+    printf '%s\n' "$val" ;;
+  *tail*)
+    [ -f "${FAKE_SSH_EVENTS:-}" ] && cat "$FAKE_SSH_EVENTS"
+    # Real `tail -F` would block; exiting is the "connection dropped" case, which
+    # the listener must survive by reconnecting rather than dying.
+    ;;
+esac
+exit 0

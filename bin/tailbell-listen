@@ -162,9 +162,13 @@ def show(title, message, urgent=False, project="", app="", entrypoint="",
 
 def stream_once(host):
     """Tail one host until the connection ends. True if any event arrived."""
+    # universal_newlines, not text=: `text` is 3.7+, and this file must stay
+    # runnable on the cluster's 3.6.8 as well as on the Mac. It was not — and the
+    # handler in watch() swallowed the TypeError, so the host was silently never
+    # streamed while every other check reported green.
     proc = subprocess.Popen(["ssh"] + SSH_OPTS + [host, REMOTE_CMD],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            text=True, bufsize=1)
+                            universal_newlines=True, bufsize=1)
     got = False
     for line in proc.stdout:
         line = line.strip()
@@ -199,8 +203,13 @@ def watch(host, stop):
         try:
             stream_once(host)
             backoff = 5
-        except Exception:
-            pass
+        except Exception as exc:
+            # Say so. `pass` here once hid a TypeError that stopped every host
+            # from being streamed, and the only symptom was silence. launchd
+            # sends this to /tmp/tailbell.err, which tailbell-doctor already
+            # shows you.
+            sys.stderr.write("tailbell-listen: %s: %r\n" % (host, exc))
+            sys.stderr.flush()
         if stop.wait(backoff):
             return
         backoff = min(backoff * 2, 60)
