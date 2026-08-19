@@ -182,14 +182,19 @@ http_post() {
     dbg "FAILED $label: curl not on PATH"
     return 1
   fi
-  code="$("$CURL" -sS -o /dev/null -w '%{http_code}' -m "$HTTP_TIMEOUT" \
+  # The response body is kept, not discarded: a revoked webhook is a 403 whose
+  # body says which one of the several possible reasons it is. "HTTP 403" alone
+  # sends you reading docs; `invalid_token` or `sign match fail` does not.
+  local out; out="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/tailbell-$$.body")"
+  code="$("$CURL" -sS -o "$out" -w '%{http_code}' -m "$HTTP_TIMEOUT" \
           ${proxy[@]+"${proxy[@]}"} -X POST \
           -H "Content-Type: $ctype" ${extra[@]+"${extra[@]}"} \
           --data-binary "$body" "$url" 2>/dev/null)"
   rc=$?
   case "$code" in
-    2*) dbg "EMITTED to $label (HTTP $code)"; return 0 ;;
-    *)  dbg "FAILED $label: HTTP ${code:-none}, curl exit $rc"; return 1 ;;
+    2*) dbg "EMITTED to $label (HTTP $code)"; rm -f "$out"; return 0 ;;
+    *)  dbg "FAILED $label: HTTP ${code:-none}, curl exit $rc — $(head -c 200 "$out" 2>/dev/null | tr '\n\r' '  ')"
+        rm -f "$out"; return 1 ;;
   esac
 }
 

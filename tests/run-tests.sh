@@ -361,6 +361,84 @@ unset TAILBELL_CHANNELS TAILBELL_NTFY_TOPIC TAILBELL_NTFY_SERVER \
 
 ########################################################################
 echo
+echo "── 安装 ──"
+
+# install.sh used to carry its own copy of the settings.json merge. It drifted:
+# five events registered here against seven in tailbell-register, so StopFailure
+# and Elicitation did nothing at all for anyone who installed the documented
+# way. Worse, it never wrote ~/.tailbell/cluster-id — and the listener skips any
+# host that has none, so the README's install produced silence with every other
+# check green. Both are regressions worth a test.
+IH="$TMP/installhome"; mkdir -p "$IH"
+HOME="$IH" bash "$REPO/install.sh" >/dev/null 2>&1
+check "install.sh 成功退出" "$?" "0"
+
+if [ -s "$IH/.tailbell/cluster-id" ]; then ok "install.sh 生成 cluster-id (没有它监听器会跳过这台机器)"
+else no "install.sh 没生成 cluster-id —— 监听器会静默跳过这台机器"; fi
+
+evs="$(/usr/bin/python3 -c "
+import json
+h = json.load(open('$IH/.claude/settings.json'))['hooks']
+print(' '.join(sorted(h)))" 2>/dev/null)"
+check "install.sh 注册全部 7 个事件" "$evs" \
+  "Elicitation Notification PreToolUse SessionEnd Stop StopFailure UserPromptSubmit"
+
+# Running it twice is the normal case — after a pull, after a redeploy.
+printf 'TAILBELL_MIN_SECONDS=99\n' >> "$IH/.tailbell/config"
+HOME="$IH" bash "$REPO/install.sh" >/dev/null 2>&1
+if grep -q 'TAILBELL_MIN_SECONDS=99' "$IH/.tailbell/config"; then ok "重装不覆盖已有 config"
+else no "重装把 config 覆盖了"; fi
+
+########################################################################
+echo
+echo "── doctor 对通道的体检 ──"
+#
+# The doctor is what you run when a notification did not arrive, so it has to
+# name the broken link rather than report a tally. These cases run it against a
+# throwaway home with deliberately broken channels, through the fake curl, so
+# they need no network either.
+
+DH="$TMP/doctorhome"; mkdir -p "$DH/state"
+doctor_out() {   # doctor_out <config lines...>  -> stdout of a doctor run
+  : > "$DH/config"
+  printf '%s\n' "$@" >> "$DH/config"
+  printf '%s\n' "TAILBELL_CURL=\"$REPO/tests/fake-curl\"" >> "$DH/config"
+  FAKE_CURL_RECORD="$DH/curl.log" TAILBELL_HOME="$DH" \
+    bash "$REPO/bin/tailbell-doctor" ${DOCTOR_ARGS:-} 2>&1
+}
+
+out="$(doctor_out 'TAILBELL_CHANNELS="file,typo-here"')"
+if printf '%s' "$out" | grep -q "不认识的通道名 'typo-here'"; then ok "doctor 点名不存在的通道"
+else no "doctor 没点名不存在的通道"; fi
+
+out="$(doctor_out 'TAILBELL_CHANNELS="slack"')"
+if printf '%s' "$out" | grep -q 'slack: 没配 TAILBELL_SLACK_WEBHOOK'; then ok "doctor 点名没配置的通道"
+else no "doctor 没点名没配置的通道"; fi
+
+# The credential must not end up in a terminal that gets screenshotted, or in an
+# issue. Host and first path segment identify it; the rest is the password.
+out="$(doctor_out 'TAILBELL_CHANNELS="slack"' \
+                  'TAILBELL_SLACK_WEBHOOK="https://hooks.slack.com/services/T00/B00/SUPERSECRET"')"
+if printf '%s' "$out" | grep -q 'SUPERSECRET'; then no "doctor 把 webhook 密钥打出来了!"
+else ok "doctor 打码 webhook,不泄露密钥"; fi
+
+# The whole point: a channel the server rejects must be named, with the status.
+out="$(FAKE_CURL_CODE=403 DOCTOR_ARGS=--test doctor_out \
+        'TAILBELL_CHANNELS="file,slack"' \
+        'TAILBELL_SLACK_WEBHOOK="https://hooks.slack.com/services/T00/B00/revoked"')"
+if printf '%s' "$out" | grep -q 'FAILED slack: HTTP 403'; then ok "doctor --test 报出被拒的通道和状态码"
+else no "doctor --test 没报出被拒的通道"; fi
+if printf '%s' "$out" | grep -q 'EMITTED to .*events.log'; then ok "同一次实测里 file 通道照常成功"
+else no "doctor --test 没验证 file 通道"; fi
+
+# A diagnostic that exits non-zero gets wrapped in `|| true` and then nobody
+# reads it. It reports, it does not fail.
+FAKE_CURL_RECORD="$DH/curl.log" TAILBELL_HOME="$DH" \
+  bash "$REPO/bin/tailbell-doctor" >/dev/null 2>&1
+check "doctor 永远以 0 退出" "$?" "0"
+
+########################################################################
+echo
 echo "── 决策日志 (「为什么没通知」靠它排查) ──"
 if [ -s "$TAILBELL_DEBUG_LOG" ]; then ok "debug.log 有内容"; else no "debug.log 是空的"; fi
 if grep -q 'skipped:' "$TAILBELL_DEBUG_LOG"; then ok "抑制决策有记录"

@@ -18,6 +18,16 @@ DEBUG="${TAILBELL_DEBUG_LOG:-$TAILBELL_HOME/debug.log}"
 STATE_DIR="${TAILBELL_STATE_DIR:-$TAILBELL_HOME/state}"
 SELFDIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Resolved exactly the way tailbell-notify resolves it, so this check cannot
+# disagree with what will actually be sent. A doctor that computes the answer a
+# second way is a doctor that reports green while the hook does something else —
+# that already happened once with the SSH host list.
+CHANNELS="${TAILBELL_CHANNELS:-}"
+if [ -z "$CHANNELS" ]; then
+  if [ "$(uname)" = "Darwin" ]; then CHANNELS="desktop"; else CHANNELS="$TRANSPORT"; fi
+fi
+CURL="${TAILBELL_CURL:-curl}"
+
 ok=0; bad=0; warn=0
 # Counting a file that may not exist yet. Guard before redirecting, so a missing
 # file is 0 rather than a shell error nobody asked for.
@@ -26,12 +36,152 @@ pass() { printf '  ✅ %s\n' "$*"; ok=$((ok+1)); }
 fail() { printf '  ❌ %s\n' "$*"; bad=$((bad+1)); }
 note() { printf '  ⚠️  %s\n' "$*"; warn=$((warn+1)); }
 sect() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# Neither good nor bad news — just what is configured. Counting it as a pass
+# would let a green tally hide the ❌ two lines below it.
+info() { printf '     %s\n' "$*"; }
 
 printf '\033[1mtailbell doctor\033[0m   (%s, %s)\n' "$(uname)" "$(hostname -s 2>/dev/null)"
 
 sect "配置"
 if [ -f "$TAILBELL_HOME/config" ]; then pass "config 存在 (transport=$TRANSPORT)"
 else note "没有 $TAILBELL_HOME/config,全部走默认值 (transport=$TRANSPORT)"; fi
+
+########################################################################
+# Delivery channels
+#
+# Reported before the platform split because channels are configured on
+# whichever side raises the event, and a broken one looks identical from both.
+#
+# Without --test nothing is sent: the checks are "is it configured", "is the URL
+# the shape that provider uses", and "can this machine reach the host at all".
+# With --test a real notification goes through every channel and the server's own
+# answer is quoted back, which is the only way to tell a revoked webhook from a
+# working one.
+########################################################################
+sect "送达通道"
+
+# A webhook URL IS the credential — anyone holding it can post as you. Keep the
+# host and the first path segment, which is all you need to recognise it, and
+# throw the rest away. This runs on a shared login node; the output gets pasted
+# into issues.
+redact() {
+  printf '%s' "$1" | /usr/bin/python3 -c '
+import sys
+try:
+    from urllib.parse import urlsplit
+except ImportError:
+    from urlparse import urlsplit
+u = urlsplit(sys.stdin.read().strip())
+parts = [p for p in u.path.split("/") if p]
+head = "/" + parts[0] if parts else ""
+tail = "/…" if len(parts) > 1 else ""
+print("%s://%s%s%s" % (u.scheme, u.netloc, head, tail))' 2>/dev/null
+}
+
+# Reachability, not correctness: curl exiting 0 means DNS resolved, the proxy (if
+# any) let us out and the TLS handshake finished. Any HTTP status counts — a 405
+# from a webhook host still proves the path out of this machine works, which is
+# the thing that breaks on a compute node with no http_proxy.
+reachable() {
+  local origin
+  origin="$(printf '%s' "$1" | sed -E 's|^(https?://[^/]+).*|\1|')"
+  "$CURL" -sS -o /dev/null -m 8 -I "$origin" >/dev/null 2>&1
+}
+
+check_channel() {
+  local name="$1" url="$2" want="$3" label="$4"
+  if [ -z "$url" ]; then
+    fail "$name: 没配 $label —— 这条通道不会送出任何东西"
+    return
+  fi
+  info "$name: $(redact "$url")"
+  case "$url" in
+    $want) ;;
+    *) note "$name: 地址不像 $name 的 webhook (通常是 ${want%\*}) —— 自建/代理地址可以忽略这条" ;;
+  esac
+  if reachable "$url"; then pass "$name: 主机可达"
+  else fail "$name: 连不上主机 —— 计算节点要走 http_proxy,登录节点直连,检查 \$http_proxy"; fi
+}
+
+if ! command -v "$CURL" >/dev/null 2>&1 && [ ! -x "$CURL" ]; then
+  note "curl 不在 PATH 上 —— 只有 file/desktop 通道能用"
+fi
+
+printf '  通道清单: %s\n' "$CHANNELS"
+for ch in $(printf '%s' "$CHANNELS" | tr ',' ' '); do
+  case "$ch" in
+    file)
+      if [ -w "$(dirname "$LOGFILE")" ]; then pass "file: 可写 $LOGFILE (release 0 的保底路径)"
+      else fail "file: $(dirname "$LOGFILE") 不可写"; fi ;;
+    desktop)
+      if [ "$(uname)" = "Darwin" ]; then pass "desktop: 本机直接渲染"
+      else fail "desktop 通道只在 macOS 有意义,这台是 $(uname)"; fi ;;
+    ntfy)
+      if [ -z "${TAILBELL_NTFY_TOPIC:-}" ]; then
+        fail "ntfy: 没配 TAILBELL_NTFY_TOPIC —— 这条通道不会送出任何东西"
+      else
+        # The topic is the password: anyone who knows it reads your
+        # notifications. Say so here, where someone is looking at the config.
+        info "ntfy: ${TAILBELL_NTFY_SERVER:-https://ntfy.sh} topic ${TAILBELL_NTFY_TOPIC:0:3}… (topic 就是密码,别外传)"
+        [ ${#TAILBELL_NTFY_TOPIC} -lt 16 ] && \
+          note "ntfy: topic 只有 ${#TAILBELL_NTFY_TOPIC} 个字符 —— 太短容易被猜到,建议 24 位以上随机串"
+        # /v1/health is the one endpoint that answers without publishing.
+        if "$CURL" -sS -m 8 "${TAILBELL_NTFY_SERVER:-https://ntfy.sh}/v1/health" 2>/dev/null | grep -q 'true'; then
+          pass "ntfy: 服务器健康检查通过"
+        else
+          fail "ntfy: ${TAILBELL_NTFY_SERVER:-https://ntfy.sh}/v1/health 不通 —— 服务器挂了或这台机器出不去"
+        fi
+      fi ;;
+    slack)   check_channel slack   "${TAILBELL_SLACK_WEBHOOK:-}"   'https://hooks.slack.com/*'                TAILBELL_SLACK_WEBHOOK ;;
+    discord) check_channel discord "${TAILBELL_DISCORD_WEBHOOK:-}" 'https://discord*.com/api/webhooks/*'      TAILBELL_DISCORD_WEBHOOK ;;
+    feishu)
+      check_channel feishu "${TAILBELL_FEISHU_WEBHOOK:-}" 'https://open.*/open-apis/bot/v2/hook/*' TAILBELL_FEISHU_WEBHOOK
+      if [ -n "${TAILBELL_FEISHU_WEBHOOK:-}" ]; then
+        if [ -n "${TAILBELL_FEISHU_SECRET:-}" ]; then
+          # Signed mode without openssl sends nothing at all, so it is a hard
+          # fail rather than a note.
+          command -v openssl >/dev/null 2>&1 \
+            && pass "feishu: 签名模式,openssl 在" \
+            || fail "feishu: 配了 TAILBELL_FEISHU_SECRET 但没有 openssl —— 签不了名,一条也发不出去"
+        else
+          note "feishu: 没配签名 —— 机器人若开了「签名校验」会拒收;开「关键词」模式的话确认标题里有那个词"
+        fi
+      fi ;;
+    '') ;;
+    *) fail "不认识的通道名 '$ch' —— 支持的是 desktop file ntfy slack discord feishu" ;;
+  esac
+done
+
+if [ "$TEST" = 1 ]; then
+  sect "通道实测 (真的发一条出去)"
+  # Driven through tailbell-notify rather than a parallel implementation here:
+  # a doctor that builds its own request tests the doctor, not the hook.
+  # TAILBELL_SYNC=1 makes the normally-backgrounded network sinks finish first.
+  dbefore=$(count_lines "$DEBUG")
+  printf '{"session_id":"doctor00-0000-0000-0000-000000000000","cwd":"%s"}' "$PWD" \
+    | TAILBELL_SYNC=1 "$SELFDIR/tailbell-notify" AskUserQuestion
+  dafter=$(count_lines "$DEBUG")
+  if [ "$dafter" -gt "$dbefore" ]; then
+    # Strip debug.log's timestamp and event columns; what matters here is which
+    # channel said what.
+    sed -n "$((dbefore+1)),${dafter}p" "$DEBUG" \
+      | sed -E 's/^[0-9]{2}-[0-9]{2} [0-9:]{8} +[A-Za-z?]+ +//' \
+      | while IFS= read -r l; do
+      case "$l" in
+        EMITTED*) printf '  ✅ %s\n' "$l" ;;
+        FAILED*)  printf '  ❌ %s\n' "$l" ;;
+        SKIPPED*) printf '  ⚠️  %s\n' "$l" ;;
+      esac
+    done
+    # Counted separately: the loop above runs in a subshell, so ok/bad set there
+    # would not survive it. This is the pipe-to-while trap, and it has bitten
+    # this file before.
+    e=$(sed -n "$((dbefore+1)),${dafter}p" "$DEBUG" | grep -c 'FAILED'); e=${e:-0}
+    if [ "$e" -gt 0 ]; then bad=$((bad+e)); else ok=$((ok+1)); fi
+  else
+    fail "hook 一行日志都没写 —— tailbell-notify 没跑起来"
+  fi
+fi
 
 if [ "$(uname)" = "Darwin" ]; then
 #################################################### workstation ##############

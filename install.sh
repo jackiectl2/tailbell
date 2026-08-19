@@ -29,21 +29,51 @@ if [ ! -f "$TB/config" ]; then
   cat > "$TB/config" <<'EOF'
 # tailbell agent config.
 #
-# transport:
-#   file  — append events to events.log; the workstation tails it over the SSH
-#           connection your editor already holds. No third party, no quota.
-#   ntfy  — POST to an ntfy server; reaches you with no SSH session up, at the
-#           cost of a third party seeing project names.
-TAILBELL_TRANSPORT="file"
+# ---------------------------------------------------------------------------
+# Channels: where a notification is sent. A comma-separated list; every name in
+# it is tried, and a failure in one never stops another.
+#
+#   file    — append to events.log; the workstation tails it over the SSH
+#             connection your editor already holds. No third party, no account,
+#             no quota, and it works from compute nodes because $HOME is one
+#             shared NFS mount. This is the guaranteed path: leave it in.
+#   ntfy    — push to a phone, reaches you with every editor closed.
+#   slack / discord / feishu — post to an incoming webhook.
+#
+# Everything after `file` puts a third party in the path, which is why none of
+# it is on by default. Leave TAILBELL_CHANNELS commented out and tailbell
+# behaves exactly as it did before channels existed.
+#TAILBELL_CHANNELS="file,ntfy"
+TAILBELL_TRANSPORT="file"          # legacy name for a single channel; still honoured
 
 # Turns shorter than this are not worth interrupting you for — you were watching.
 TAILBELL_MIN_SECONDS=60
 
-# Only read when transport=ntfy. The topic IS the password: make it long and
-# random, and note that a free ntfy.sh account cannot reserve (privatise) it.
+# ---------------------------------------------------------------------------
+# ntfy. THE TOPIC IS THE PASSWORD: anyone who knows it reads every notification
+# you send, so make it long and random —
+#     head -c 18 /dev/urandom | base64 | tr -d '/+='
+# and note that a *free* ntfy.sh account cannot reserve or privatise a topic.
+# Measured: limits.basis is "ip" for a free account exactly as for an anonymous
+# one — same 250/day, still metered on this login node's shared address.
 #TAILBELL_NTFY_TOPIC=""
 #TAILBELL_NTFY_SERVER="https://ntfy.sh"
 #TAILBELL_NTFY_TOKEN=""
+
+# ---------------------------------------------------------------------------
+# Webhooks. Each of these URLs *is* a credential — whoever holds it can post as
+# you. This file is chmod 600 for that reason; keep it that way, and remember a
+# shared login node has other people's root on it.
+#TAILBELL_SLACK_WEBHOOK=""
+#TAILBELL_DISCORD_WEBHOOK=""
+#TAILBELL_FEISHU_WEBHOOK=""
+#TAILBELL_FEISHU_SECRET=""        # only if the bot is in "signed request" mode
+
+# ---------------------------------------------------------------------------
+# Compute nodes reach the outside through ARC's preset http_proxy and curl picks
+# that up on its own. Set this only to override a preset one that is wrong.
+#TAILBELL_HTTP_PROXY=""
+#TAILBELL_HTTP_TIMEOUT=8
 EOF
   chmod 600 "$TB/config"
   echo "    写入 $TB/config"
@@ -52,40 +82,14 @@ else
 fi
 
 echo "==> 3/3 注册 hooks 到 ~/.claude/settings.json"
-# Resolve the interpreter first. A bare `python3` would pick up whatever
-# virtualenv is active, which on this cluster is a per-project .venv.
-PY=/usr/bin/python3
-[ -x "$PY" ] || PY="$(command -v python3 || echo python3)"
-"$PY" - "$REPO" <<'PYEOF'
-import json, pathlib, shutil, sys, time
-repo = sys.argv[1]
-p = pathlib.Path.home()/".claude"/"settings.json"
-cfg = {}
-if p.exists():
-    shutil.copy(p, str(p) + ".bak." + time.strftime("%Y%m%d-%H%M%S"))
-    cfg = json.loads(p.read_text())
-N = "%s/bin/tailbell-notify" % repo
-h = cfg.setdefault("hooks", {})
-
-def merge(ev, arg, matcher=None):
-    """Replace any existing tailbell entry for this event, keep everyone else's."""
-    entry = {"hooks": [{"type": "command", "command": "%s %s" % (N, arg)}]}
-    if matcher:
-        entry["matcher"] = matcher
-    kept = [e for e in (h.get(ev) or [])
-            if "tailbell-notify" not in " ".join(
-                x.get("command", "") for x in e.get("hooks", []))]
-    h[ev] = kept + [entry]
-
-merge("Stop", "Stop")
-merge("UserPromptSubmit", "UserPromptSubmit")
-merge("SessionEnd", "SessionEnd")
-merge("Notification", "Notification")
-merge("PreToolUse", "AskUserQuestion", matcher="AskUserQuestion")
-p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text(json.dumps(cfg, indent=2) + "\n")
-print("    已合并 (旧文件已备份,其他 hook 保留)")
-PYEOF
+# Delegated to tailbell-register rather than repeated here. Keeping a second
+# copy of the merge meant this script registered five events while the register
+# script registered seven — so StopFailure and Elicitation silently did nothing
+# for anyone who installed the documented way. It also creates
+# ~/.tailbell/cluster-id, which the workstation listener uses to open exactly one
+# stream per cluster; without that file the listener skips the host entirely and
+# you get silence with every other check green.
+bash "$REPO/bin/tailbell-register" "$REPO/bin/tailbell-notify" | sed 's/^/    /'
 
 cat <<DONE
 
