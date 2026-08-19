@@ -3,3 +3,7 @@
 state/
 .DS_Store
 __pycache__/
+
+# npm packaging artefacts, never the package itself
+node_modules/
+*.tgz

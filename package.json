@@ -1,0 +1,45 @@
+{
+  "name": "tailbell",
+  "version": "0.8.0",
+  "description": "Desktop notifications when Claude Code finishes a turn or blocks waiting for you — including over SSH on a shared HPC cluster, with no third-party service.",
+  "keywords": [
+    "claude-code",
+    "notifications",
+    "hooks",
+    "remote-ssh",
+    "hpc",
+    "slurm",
+    "ntfy",
+    "macos"
+  ],
+  "homepage": "https://github.com/jackiectl/tailbell#readme",
+  "bugs": "https://github.com/jackiectl/tailbell/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jackiectl/tailbell.git"
+  },
+  "license": "MIT",
+  "author": "Tianlang (Jackie) Chen <272573266+jackiectl@users.noreply.github.com>",
+  "bin": {
+    "tailbell": "bin/tailbell"
+  },
+  "files": [
+    "bin/",
+    "hooks/",
+    "mac/",
+    "docs/",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bash tests/run-tests.sh"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "engines": {
+    "node": ">=14"
+  }
+}

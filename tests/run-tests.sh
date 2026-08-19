@@ -574,6 +574,49 @@ else no "重装把 config 覆盖了"; fi
 
 ########################################################################
 echo
+echo "── 打包与入口 ──"
+
+TB="$REPO/bin/tailbell"
+
+# Both packages install bin/tailbell as a symlink — Homebrew out of libexec, npm
+# out of node_modules — so if it cannot find the rest of the tree through a
+# symlink, `brew install` produces a command that does nothing. macOS has no
+# `readlink -f`, which is the trap this resolves by hand.
+LN="$TMP/linkdir"; mkdir -p "$LN"
+ln -sf "$TB" "$LN/tailbell"
+check "从符号链接调用也能定位仓库" "$("$LN/tailbell" version 2>/dev/null)" \
+  "$(/usr/bin/python3 -c "import json;print(json.load(open('$REPO/.claude-plugin/plugin.json'))['version'])")"
+
+# The two packages and the plugin all claim a version. Three files disagreeing
+# about which release this is makes a bug report unanswerable.
+pv="$(/usr/bin/python3 -c "import json;print(json.load(open('$REPO/.claude-plugin/plugin.json'))['version'])")"
+nv="$(/usr/bin/python3 -c "import json;print(json.load(open('$REPO/package.json'))['version'])")"
+check "plugin.json 和 package.json 版本一致" "$nv" "$pv"
+
+if "$TB" help 2>&1 | grep -q 'tailbell doctor'; then ok "tailbell help 列出子命令"
+else no "tailbell help 没列出子命令"; fi
+
+"$TB" no-such-subcommand >/dev/null 2>&1
+check "未知子命令非 0 退出 (它不是 hook,可以失败)" "$?" "2"
+
+# npm's "files" list decides what actually ships. Leaving bin/ out of it would
+# publish a package whose only executable is missing, and nobody finds out until
+# someone installs it.
+if /usr/bin/python3 -c "
+import json, sys
+f = json.load(open('$REPO/package.json'))
+sys.exit(0 if 'bin/' in f['files'] and f['bin']['tailbell'] == 'bin/tailbell' else 1)"; then
+  ok "package.json 真的会把 bin/ 打进去"
+else no "package.json 的 files/bin 对不上,发出去会是个空壳"; fi
+
+# The formula must not carry a checksum for a tarball that does not exist yet.
+# The directive, not the word — the comment above it explains why it is absent.
+if grep -qE '^[[:space:]]*sha256[[:space:]]+"' "$REPO/Formula/tailbell.rb"; then
+  no "formula 里有 sha256 —— 标签还没打,这个校验和对不上任何文件"
+else ok "formula 只支持 --HEAD,不预写校验和"; fi
+
+########################################################################
+echo
 echo "── doctor 对通道的体检 ──"
 #
 # The doctor is what you run when a notification did not arrive, so it has to
