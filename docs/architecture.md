@@ -205,6 +205,26 @@ The JSON API is used anyway, for two reasons that survive the measurement:
 Recording the negative result rather than the assumption, because "we changed it
 because it was broken" would have been a claim this file could not back up.
 
+### Channels from a compute node: verified, not assumed
+
+The trap the brief named is a channel that works in testing on a login node and
+fails under `sbatch`, because compute nodes have no direct route out.
+
+**Measured 2026-08-19.** A one-minute job on `gl3009` ran `tailbell-notify Stop`
+with `TAILBELL_CHANNELS="file,ntfy"`:
+
+- `http_proxy` is preset to `http://proxy1.arc-ts.umich.edu:3128/` inside the job,
+  and `curl` picks it up with no configuration from us;
+- `debug.log` recorded both sinks succeeding — the file line, then
+  `EMITTED to ntfy (HTTP 200)`;
+- polling the topic returned the message intact, priority and tags included.
+
+So a `sbatch` job can ring a phone. One detail worth writing down because it cost
+a rerun: **`/tmp` is node-local.** The first attempt put the config under `/tmp`
+and the compute node found nothing there, silently fell back to defaults, and
+sent through the file sink only. `$HOME` is the shared mount; `/tmp` is not. That
+is the same fact §3 relies on, seen from the other side.
+
 ### Why answering from a phone needs nothing listening on the agent host
 
 The obvious design is an inbound channel: hold a port, let the phone reach it.

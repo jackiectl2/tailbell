@@ -266,7 +266,7 @@ with all of this commented and explained.
 bash tests/run-tests.sh
 ```
 
-107 cases, no side effects, and **no network** — every channel is exercised
+113 cases, no side effects, and **no network** — every channel is exercised
 through a recorded fake `curl`, and the approval round trip through a fake phone
 that presses the button on whatever was just pushed. Every case corresponds to
 something that actually broke, so the suite doubles as the regression record.

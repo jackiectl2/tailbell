@@ -50,7 +50,7 @@ Never exercised: ⌥Esc bulk clear · `StopFailure` · `Elicitation` · permissi
 prompts in the terminal CLI · stack compression when alerts fill the screen ·
 click-to-focus for anything other than VS Code.
 
-`bash tests/run-tests.sh` — 24 cases, all passing, no side effects.
+`bash tests/run-tests.sh` — 24 cases at the time of writing; release 8 took it to 113.
 
 ## Three problems the migration must solve
 

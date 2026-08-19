@@ -100,7 +100,7 @@ third-party component load-bearing on the v0 path, that is a regression.
 ## Verify
 
 ```bash
-bash tests/run-tests.sh          # 107 cases, no side effects, no network
+bash tests/run-tests.sh          # 113 cases, no side effects, no network
 bin/tailbell-doctor --test       # end to end, every channel; run on BOTH sides
 claude plugin validate .         # manifest and hook schema
 bash -n <every shell file>       # two real syntax errors have shipped this way

@@ -53,9 +53,11 @@ Everything here needs hardware or a session this branch was written without.
    cannot be provoked without an interactive terminal CLI session. The approval
    path is *designed* against the documented contract and *tested* against a fake
    phone; it is not yet known to work against the real event.
-3. **No channel has been delivered to a real phone.** The sinks are tested
-   against a recorded fake `curl`; a real ntfy/Slack/Discord/Feishu round trip,
-   and the compute-node-through-`http_proxy` case, still need doing.
+3. **No channel has been delivered to a real phone.** Half of this is now done:
+   a Slurm job on `gl3009` published to ntfy through ARC's proxy and the message
+   came back off the topic intact (architecture.md §7). What is untested is the
+   last hop — an actual phone subscribed to the topic — and the Slack, Discord
+   and Feishu webhooks, which need real endpoints to point at.
 4. **Nothing is published.** No git push, no tag, no brew tap, no npm publish. The
    formula is deliberately HEAD-only until a tag exists.
 
