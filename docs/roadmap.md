@@ -20,6 +20,17 @@ would be wrong.
 | 5 | `v5-claude-and-codex` | Codex as well as Claude Code. **First real architectural step:** an adapter layer, because each agent's event model differs. Needs a stable internal event schema first. | large |
 | 6 | `v6-any-agent` | Arbitrary agents. Generalises release 5's adapter into a documented contract so a new agent is a plugin, not a patch. | large |
 | 7 | `v7-any-os` | Windows as well as macOS: a third renderer (BurntToast or SnoreToast, both of which need an AppId registered first) and a listener that does not assume `launchd`. | large |
+| 8 | `v8-parity` | Everything comparable tools offer and tailbell does not, minus Windows (release 7) and other agents (releases 5–6): supported optional delivery channels, phone-side approval, sound, packaging, usage warnings. Scope and guardrails in [v8-brief.md](v8-brief.md); the field it is measured against in [competitors.md](competitors.md). | medium |
+
+## Execution order is not the numeric order
+
+    v8  →  v7  →  v5  →  v6
+
+Release 8 was added after surveying the field and comes first because it is the
+gap a new user notices. Other agents come **last** by decision: releases 5–6 force
+an agent-neutral event schema, and everything before them changes what that schema
+must carry, so doing them early means writing it twice. Releases 2, 3 and 4 are
+small remainders, folded in wherever they are touched.
 
 ## Boundaries worth keeping
 
