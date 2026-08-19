@@ -21,10 +21,44 @@ Claude Code normally for a while, count.
 | `UserPromptSubmit` | 2 | ✅ |
 | `Stop` | 1 | ✅ fires on turn completion |
 | `Notification` | **0** | ❌ |
-| `PermissionRequest` | **0** | ❌ |
+| `PermissionRequest` | **0** | ❌ in this window — see the correction below |
 
 All invocations carried `ENTRYPOINT=claude-vscode`, confirming these are the
 panel's own process and not a stray terminal session.
+
+**Correction, measured 2026-08-19 over the window 2026-07-30 to 2026-08-12.** The
+probe stayed registered on `Notification` and `PermissionRequest` after the table
+above was written, and `~/.claude/hooks/hook-probe.log` now records:
+
+| event | fires | note |
+| --- | --- | --- |
+| `Notification` | **0** | ❌ still, over two more weeks |
+| `PermissionRequest` | **16** | ⚠️ fires — but every single one is `tool_name: "AskUserQuestion"` |
+
+So `PermissionRequest` is *not* dead in the panel; it is alive and carries exactly
+one kind of event. Not one of the 16 was a tool permission prompt, which is what
+#80110 predicts: the extension handles those itself and never reaches the hook.
+The conclusion below is unchanged — the panel still cannot tell you *"Claude is
+waiting for permission"* — but the hook is registered and live there, so if the
+extension ever stops bypassing it, tailbell inherits the event without a change.
+
+⚠️ **Privacy.** `PermissionRequest` carries `tool_input`, which for
+`AskUserQuestion` is the full text of every question and option. That is a second
+place a hook is handed conversation content, alongside `Stop.last_assistant_message`.
+tailbell reads neither; both are guarded by canary tests in `tests/run-tests.sh`.
+
+Also in that payload and undocumented: `prompt_id`, `permission_mode`, and
+`effort.level`.
+
+**`PermissionRequest` can return a decision.** The hook reference bundled in
+Claude Code `2.1.160` describes it as *"Run before permission prompt"*, and the
+runtime contains `Permission denied by PermissionRequest hook`, `PermissionRequest
+hook allowed … with updatedInput`, and the decision enum
+`"allow" | "deny" | "ask" | "defer"`. That is what release 8's phone-approval path
+hooks, rather than a `PreToolUse` matcher on `*` — which would cost ~787 process
+spawns per session and would fire for calls the allowlist had already approved.
+**Not exercised live:** headless `claude -p` auto-approves and never prompts, so
+the hook cannot be provoked without an interactive terminal CLI session.
 
 **Consequence.** The two events that mean *"Claude is waiting for you"* are
 unavailable in the panel, so the signal has to be assembled from the others.
