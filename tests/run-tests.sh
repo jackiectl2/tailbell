@@ -641,6 +641,32 @@ IH="$TMP/installhome"; mkdir -p "$IH"
 HOME="$IH" bash "$REPO/install.sh" >/dev/null 2>&1
 check "install.sh 成功退出" "$?" "0"
 
+# flock does not exist on macOS at all, and install.sh listed it as required —
+# so the agent side could not be installed on the very machine release 4 exists
+# to support. CI on macos-latest caught it; this reproduces it anywhere by
+# hiding flock behind a PATH that does not contain it.
+NOFLOCK="$TMP/noflock"; mkdir -p "$NOFLOCK/bin"
+for t in jq hostname stat tee date cat mkdir chmod sed grep printf ls od tr wc tail; do
+  p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NOFLOCK/bin/$t" 2>/dev/null
+done
+IH2="$TMP/installhome-noflock"; mkdir -p "$IH2"
+env -i HOME="$IH2" PATH="$NOFLOCK/bin:/usr/bin:/bin" \
+  bash "$REPO/install.sh" >/dev/null 2>&1
+rc=$?
+# /usr/bin:/bin still carries flock on Linux, so hide it explicitly instead.
+if command -v flock >/dev/null 2>&1; then
+  cat > "$NOFLOCK/bin/flock" <<'NOFLOCKEOF'
+#!/bin/sh
+echo "flock: command not found" >&2
+exit 127
+NOFLOCKEOF
+  chmod +x "$NOFLOCK/bin/flock"
+fi
+check "没有 flock 时 install.sh 仍能装完 (macOS 就没有 flock)" "$rc" "0"
+if grep -q 'flock' "$IH2/.tailbell/config" 2>/dev/null || [ -s "$IH2/.tailbell/cluster-id" ]; then
+  ok "并且照常生成了 cluster-id"
+else no "没有 flock 时没装全"; fi
+
 if [ -s "$IH/.tailbell/cluster-id" ]; then ok "install.sh 生成 cluster-id (没有它监听器会跳过这台机器)"
 else no "install.sh 没生成 cluster-id —— 监听器会静默跳过这台机器"; fi
 
@@ -664,8 +690,18 @@ printf '{"session_id":"%s","cwd":"/x/oneliner"}' "$s" \
         -u TAILBELL_DEBUG_LOG -u TAILBELL_STATE_DIR -u TAILBELL_MIN_SECONDS \
         HOME="$OH" TAILBELL_HOME="$OH/.tailbell" \
         "$OH/tailbell/bin/tailbell-notify" Stop
-if [ -s "$OH/.tailbell/events.log" ]; then ok "并且装完就能发出一条通知"
-else no "装完发不出通知"; fi
+# Where that notification lands is platform-dependent, and asserting the log file
+# everywhere is how this failed on macOS: with no channel configured a Mac
+# resolves to `desktop` and draws the alert locally, which is correct — there is
+# nothing to transport to. Same split as the release 0 case above.
+if [ "$(uname)" = "Darwin" ]; then
+  if grep -q 'SHOWN' "$OH/.tailbell/debug.log" 2>/dev/null; then
+    ok "并且装完就能发出一条通知 (macOS:本机渲染)"
+  else no "装完发不出通知 (macOS 上应走本机渲染)"; fi
+else
+  if [ -s "$OH/.tailbell/events.log" ]; then ok "并且装完就能发出一条通知"
+  else no "装完发不出通知"; fi
+fi
 
 evs="$(/usr/bin/python3 -c "
 import json

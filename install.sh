@@ -12,8 +12,9 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 TB="$HOME/.tailbell"
 
 echo "==> 1/3 检查依赖"
+# Required: without these the hook can do nothing at all.
 missing=""
-for t in jq flock hostname stat tee date; do
+for t in jq hostname stat tee date; do
   command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
 done
 if [ -n "$missing" ]; then
@@ -21,7 +22,22 @@ if [ -n "$missing" ]; then
   echo "       tailbell 会静默失效。装上再来。"
   exit 1
 fi
-echo "    jq / flock / coreutils 都在"
+
+# flock is NOT required, and treating it as required made this script exit 1 on
+# every Mac — macOS has no flock(1) at all, so the agent side could not be
+# installed on the machine release 4 exists to support. Caught by CI on
+# macos-latest, which is what that runner is for.
+#
+# What it actually buys: serialising concurrent sessions appending to one log on
+# a shared NFS $HOME. That is the cluster case. Without it the sink falls back to
+# a plain append, which is fine on a local filesystem.
+if command -v flock >/dev/null 2>&1; then
+  echo "    jq / flock / coreutils 都在"
+else
+  echo "    jq / coreutils 都在"
+  echo "    ⚠️  没有 flock(macOS 本来就没有)—— 并发写日志退回普通追加。"
+  echo "       本地文件系统上没问题;共享 NFS 上多个会话同时写才需要它。"
+fi
 
 echo "==> 2/3 建立 $TB"
 mkdir -p "$TB/state"
