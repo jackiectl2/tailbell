@@ -83,7 +83,7 @@ Only system tooling — no Homebrew package, no app, no service.
 
 | side | needs |
 | --- | --- |
-| agent host | `bash`, `jq`, `flock`, coreutils |
+| agent host | `bash`, `jq`, coreutils. `flock` if it exists — macOS has none, and it is only needed to serialise concurrent writes on a shared NFS home |
 | workstation (macOS) | `bash`, `ssh`, `launchd`, `osascript`, `/usr/bin/python3` — all built in |
 
 `curl` is needed only if you turn on an optional channel.
@@ -281,7 +281,7 @@ with all of this commented and explained.
 bash tests/run-tests.sh
 ```
 
-126 cases, no side effects, and **no network** — every channel is exercised
+128 cases, no side effects, and **no network** — every channel is exercised
 through a recorded fake `curl`, and the approval round trip through a fake phone
 that presses the button on whatever was just pushed. Every case corresponds to
 something that actually broke, so the suite doubles as the regression record.

@@ -69,6 +69,9 @@ committed.
 - **Code and comments in English**, chat with the user in 中英混杂. Comments explain
   *why*, never *what* — most of the non-obvious code exists to work around a
   specific upstream bug, so name the bug.
+- **`flock` is optional, not required.** macOS has no `flock(1)`. Listing it as
+  a hard dependency made `install.sh` exit 1 on every Mac. The file sink falls
+  back to a plain append.
 - **Never a bare `python3`.** It resolves to whatever virtualenv is active. Use
   `/usr/bin/python3`. Note the cluster's system Python is **3.6.8**, so no 3.7+
   syntax in anything that runs there; the Mac's is current.
@@ -116,7 +119,7 @@ third-party component load-bearing on the v0 path, that is a regression.
 ## Verify
 
 ```bash
-bash tests/run-tests.sh          # 126 cases, no side effects, no network
+bash tests/run-tests.sh          # 128 cases, no side effects, no network
 bin/tailbell-doctor --test       # end to end, every channel; run on BOTH sides
 claude plugin validate .         # manifest and hook schema
 bash -n <every shell file>       # two real syntax errors have shipped this way
