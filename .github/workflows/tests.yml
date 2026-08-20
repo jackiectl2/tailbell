@@ -60,13 +60,15 @@ jobs:
         # tests/fake-curl and the approval round trip through a fake phone.
         run: bash tests/run-tests.sh
 
-      - name: The suite must not have reached the network
-        # If a case ever starts making a real request, it will pass locally and
-        # fail here, which is the point.
+      - name: The suite must pass with no working curl at all
+        # A stronger check than grepping for URLs, and a much less brittle one:
+        # put a curl on PATH that refuses to connect, and run the whole suite
+        # again. Everything that reaches outside is supposed to go through an
+        # injectable command, so nothing should notice. A case that quietly
+        # started making live requests would pass on a laptop and fail here.
         run: |
-          if grep -rn 'curl -\|https://ntfy.sh\|hooks.slack.com/services/T[0-9]' tests/run-tests.sh \
-             | grep -v 'fake\|example\|T00' ; then
-            echo "a test looks like it reaches a real endpoint"
-            exit 1
-          fi
-          echo "no real endpoints referenced"
+          mkdir -p "$RUNNER_TEMP/nonet"
+          printf '#!/bin/sh\necho "curl: (7) refused by CI" >&2\nexit 7\n' \
+            > "$RUNNER_TEMP/nonet/curl"
+          chmod +x "$RUNNER_TEMP/nonet/curl"
+          PATH="$RUNNER_TEMP/nonet:$PATH" bash tests/run-tests.sh
