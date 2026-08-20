@@ -1,6 +1,6 @@
 # Homebrew formula for tailbell.
 #
-#   brew tap jackiectl/tailbell https://github.com/jackiectl/tailbell
+#   brew tap jackiectl2/tailbell https://github.com/jackiectl2/tailbell
 #   brew install --HEAD tailbell
 #
 # HEAD-only on purpose. A stable bottle needs a tagged tarball and its sha256,
@@ -14,8 +14,8 @@
 # visible step, and the caveats below say so.
 class Tailbell < Formula
   desc "Desktop notifications when Claude Code finishes or needs you, including over SSH on an HPC cluster"
-  homepage "https://github.com/jackiectl/tailbell"
-  head "https://github.com/jackiectl/tailbell.git", branch: "main"
+  homepage "https://github.com/jackiectl2/tailbell"
+  head "https://github.com/jackiectl2/tailbell.git", branch: "main"
   license "MIT"
 
   # No dependencies, and that is the guarantee rather than an oversight: bash,

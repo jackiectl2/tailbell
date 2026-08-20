@@ -93,7 +93,7 @@ Only system tooling — no Homebrew package, no app, no service.
 **On the machine running Claude Code** (the cluster login node):
 
 ```bash
-git clone https://github.com/jackiectl/tailbell.git ~/tailbell
+git clone https://github.com/jackiectl2/tailbell.git ~/tailbell
 bash ~/tailbell/install.sh
 ```
 
@@ -109,14 +109,14 @@ Or, if you prefer one line — it clones the repo and runs the same installer, a
 its header shows you the two commands so you can run them yourself instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jackiectl/tailbell/main/packaging/get-tailbell.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jackiectl2/tailbell/main/packaging/get-tailbell.sh | bash
 ```
 
 Or as a Claude Code plugin, which registers the same hooks from
 `hooks/hooks.json` — then you can skip `install.sh`. Or with Homebrew:
 
 ```bash
-brew tap jackiectl/tailbell https://github.com/jackiectl/tailbell
+brew tap jackiectl2/tailbell https://github.com/jackiectl2/tailbell
 brew install --HEAD tailbell
 tailbell install
 ```

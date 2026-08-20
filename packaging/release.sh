@@ -12,7 +12,7 @@ set -euo pipefail
 
 VER="${1:?用法: bash packaging/release.sh <version>   例如 0.8.0}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-OWNER=jackiectl
+OWNER=jackiectl2
 NAME=tailbell
 URL="https://github.com/$OWNER/$NAME/archive/refs/tags/v$VER.tar.gz"
 

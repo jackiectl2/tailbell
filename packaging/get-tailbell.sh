@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # One-line install:
 #
-#   curl -fsSL https://raw.githubusercontent.com/jackiectl/tailbell/main/packaging/get-tailbell.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jackiectl2/tailbell/main/packaging/get-tailbell.sh | bash
 #
 # You are about to pipe a script from the internet into a shell, which is worth
 # a moment's thought every time. This one clones the repository into ~/tailbell
 # and runs its installer, and you can do both by hand instead:
 #
-#   git clone https://github.com/jackiectl/tailbell.git ~/tailbell
+#   git clone https://github.com/jackiectl2/tailbell.git ~/tailbell
 #   bash ~/tailbell/install.sh
 #
 # That is the supported path and the one the tests exercise. This file exists
@@ -15,7 +15,7 @@
 # immaturity — not because piping to a shell is a good habit.
 set -euo pipefail
 
-REPO_URL="${TAILBELL_REPO:-https://github.com/jackiectl/tailbell.git}"
+REPO_URL="${TAILBELL_REPO:-https://github.com/jackiectl2/tailbell.git}"
 DEST="${TAILBELL_DIR:-$HOME/tailbell}"
 BRANCH="${TAILBELL_BRANCH:-main}"
 
