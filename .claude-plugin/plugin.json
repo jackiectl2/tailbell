@@ -5,10 +5,10 @@
   "description": "Desktop notifications when Claude Code finishes or needs you — including over SSH on an HPC cluster, with no third-party service. Optional phone push, phone approval, and per-event sounds.",
   "author": {
     "name": "Tianlang (Jackie) Chen",
-    "email": "272573266+jackiectl@users.noreply.github.com",
-    "url": "https://github.com/jackiectl"
+    "email": "305351710+jackiectl2@users.noreply.github.com",
+    "url": "https://github.com/jackiectl2"
   },
-  "repository": "https://github.com/jackiectl/tailbell",
+  "repository": "https://github.com/jackiectl2/tailbell",
   "license": "MIT",
   "keywords": [
     "notifications",

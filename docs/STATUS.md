@@ -70,26 +70,31 @@ Everything here needs hardware or a session this branch was written without.
    and Feishu webhooks, which need real endpoints to point at.
 4. **Nothing is published.** No git push, no tag, no brew tap, no npm publish. The
    formula is deliberately HEAD-only until a tag exists.
-5. **The GitHub repository does not exist yet, and only a browser can create
-   it.** `origin` is set to `git@github.com:jackiectl/tailbell.git`; the repo has
-   to be made at github.com/new first — GitHub does not create one on push.
+5. **The project moved to a second GitHub account, `jackiectl2`.** The original
+   `jackiectl` is flagged: invisible to anonymous requests (profile, user API and
+   numeric-id lookup all 404 while `torvalds` resolves from the same host) and
+   its API quota is zero, so `gh` cannot act on it. Plain git still worked there,
+   which is why its other repositories keep pushing.
 
-   **Do not re-investigate the handle.** It is `jackiectl`, confirmed by SSH:
-   `ssh -T git@github.com` answers *"Hi jackiectl! You've successfully
-   authenticated"*. The fourteen URLs across README, package.json,
-   Formula/tailbell.rb, .claude-plugin/plugin.json and packaging/ are correct.
+   Done: every published URL now points at `jackiectl2`, the whole history was
+   rewritten to that account's noreply address (GitHub attributes commits by
+   email, and nothing had ever been pushed, so this was free), `user.email` is
+   set **repo-locally** so the account's other repositories keep their own
+   identity, and `origin` is `github-jackiectl2:jackiectl2/tailbell.git`.
 
-   What will mislead you if you check it the obvious way: **the account is
-   flagged, so it is invisible to anonymous requests.** Measured 2026-08-19 —
-   `github.com/jackiectl`, `api.github.com/users/jackiectl` and a lookup by the
-   numeric id `272573266` all return 404 while `torvalds` resolves fine from the
-   same machine, and a user search returns nothing. None of that means the
-   account is gone.
+   The pre-rewrite commits are still in `refs/original/`. To undo the whole
+   thing: `git reset --hard refs/original/refs/heads/<branch>` per branch.
 
-   The `gh` CLI cannot be used either, and not because its token is bad:
-   `gh` reports *"API rate limit already exceeded for user ID 272573266"* — the
-   flag zeroes the API quota. `git` itself is unaffected, which is why pushing to
-   the account's other repositories keeps working.
+   **Two things left, and neither can be done from here:**
+   - The **public key must be added to `jackiectl2`** — GitHub allows a key on
+     one account only, so the existing `~/.ssh/id_ed25519` authenticates as
+     `jackiectl` and always will. A second key pair
+     (`~/.ssh/id_ed25519_jackiectl2`) and an `~/.ssh/config` alias
+     (`github-jackiectl2`) are already in place; the key just needs pasting into
+     github.com/settings/keys while signed in as `jackiectl2`.
+   - The **repository must be created in a browser** at github.com/new, named
+     `tailbell`, with no README/.gitignore/licence — GitHub does not create one
+     on push, and creating one needs the API.
 
 ## Open — older, still true
 

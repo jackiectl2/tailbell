@@ -12,14 +12,14 @@
     "ntfy",
     "macos"
   ],
-  "homepage": "https://github.com/jackiectl/tailbell#readme",
-  "bugs": "https://github.com/jackiectl/tailbell/issues",
+  "homepage": "https://github.com/jackiectl2/tailbell#readme",
+  "bugs": "https://github.com/jackiectl2/tailbell/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jackiectl/tailbell.git"
+    "url": "git+https://github.com/jackiectl2/tailbell.git"
   },
   "license": "MIT",
-  "author": "Tianlang (Jackie) Chen <272573266+jackiectl@users.noreply.github.com>",
+  "author": "Tianlang (Jackie) Chen <305351710+jackiectl2@users.noreply.github.com>",
   "bin": {
     "tailbell": "bin/tailbell"
   },
