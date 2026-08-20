@@ -37,6 +37,7 @@ wherever they touch.
 | how does the field compare, what did release 8 close | [competitors.md](competitors.md) |
 | why is there no two-way remote control | [two-way-control.md](two-way-control.md) |
 | why does tailbell not warn about quota | [usage-quota.md](usage-quota.md) |
+| what still needs a Mac, a phone or a real webhook, and exactly how to check it | [verify-release-8.md](verify-release-8.md) |
 | what broke before, and what must never break again | `tests/run-tests.sh` |
 | where did this repo come from | [MIGRATION.md](MIGRATION.md) |
 
@@ -67,6 +68,15 @@ Everything here needs hardware or a session this branch was written without.
    and Feishu webhooks, which need real endpoints to point at.
 4. **Nothing is published.** No git push, no tag, no brew tap, no npm publish. The
    formula is deliberately HEAD-only until a tag exists.
+5. **The GitHub account this repository points at cannot be found.** Checked
+   2026-08-19 from a login node with working GitHub access (`torvalds` resolves
+   fine): `github.com/jackiectl`, `github.com/JackyCTL` and
+   `github.com/aevum-orrin` all return 404, and so does the numeric id
+   `272573266` from the commit email. Fourteen URLs across README, package.json,
+   Formula/tailbell.rb, .claude-plugin/plugin.json and packaging/ are built from
+   that handle. **Confirm the exact spelling from the account itself before any
+   of them is trusted** — it is one `sed` once known, and nothing should be
+   pushed until it is.
 
 ## Open — older, still true
 
