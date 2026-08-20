@@ -197,18 +197,27 @@ decide() {   # decide <allow|deny>
 }
 
 rejected=0
+polled=0
 # Poll. `since` is stamped before the push, so an answer given faster than the
 # first poll interval is still in the window rather than missed.
 while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep "$POLL"
-  reply="$(
-    if [ -n "$auth" ]; then
-      "$CURL" -sS -m "$HTTP_TIMEOUT" $(curl_args) -H "$auth" \
-        "$SERVER/$TOPIC/json?poll=1&since=$since" 2>/dev/null
-    else
-      "$CURL" -sS -m "$HTTP_TIMEOUT" $(curl_args) \
-        "$SERVER/$TOPIC/json?poll=1&since=$since" 2>/dev/null
-    fi)"
+  if [ -n "$auth" ]; then
+    reply="$("$CURL" -sS -m "$HTTP_TIMEOUT" $(curl_args) -H "$auth" \
+             "$SERVER/$TOPIC/json?poll=1&since=$since" 2>/dev/null)"
+  else
+    reply="$("$CURL" -sS -m "$HTTP_TIMEOUT" $(curl_args) \
+             "$SERVER/$TOPIC/json?poll=1&since=$since" 2>/dev/null)"
+  fi
+  prc=$?
+  # A poll that cannot run at all — a 401 on a protected topic, a dead proxy —
+  # produces the same empty string as nobody having answered yet, and then the
+  # same "no decision" ending. Those need telling apart when you are working out
+  # why tapping Allow did nothing. Once, not once per tick.
+  if [ "$prc" != "0" ] && [ "$polled" = 0 ]; then
+    polled=1
+    dbg "poll failed (curl exit $prc) — cannot read $SERVER/$TOPIC; check the topic and TAILBELL_APPROVE_TOKEN"
+  fi
   [ -n "$reply" ] || continue
 
   # Newline-delimited JSON, one object per message. Anything that is not exactly

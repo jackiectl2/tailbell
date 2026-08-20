@@ -554,6 +554,19 @@ approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"' \
 check "不在 TAILBELL_APPROVE_TOOLS 里的工具不介入" "$(verdict "$(ask allow Bash)")" ""
 check "在清单里的工具照常介入" "$(verdict "$(ask allow Write)")" "allow"
 
+# The registered hook timeout has to follow the configured TTL. Claude Code
+# kills a hook at its timeout, and a killed hook is a decision that never
+# arrives — which looks exactly like nobody answering.
+RH="$TMP/reghome"; mkdir -p "$RH/.tailbell"
+printf 'TAILBELL_APPROVE_TTL=300\n' > "$RH/.tailbell/config"
+HOME="$RH" TAILBELL_HOME="$RH/.tailbell" \
+  bash "$REPO/bin/tailbell-register" --approve "$REPO/bin/tailbell-notify" >/dev/null 2>&1
+check "hook 超时跟随配置里的 TTL" \
+  "$(/usr/bin/python3 -c "
+import json
+h = json.load(open('$RH/.claude/settings.json'))['hooks']['PermissionRequest']
+print(h[0]['hooks'][0].get('timeout'))" 2>/dev/null)" "330"
+
 # A hook that writes anything else to stdout turns a decision into plain text —
 # Claude Code parses this, and "does not start with {" means it is ignored.
 out="$(ask allow Write)"

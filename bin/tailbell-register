@@ -21,6 +21,14 @@ set -euo pipefail
 APPROVE=0
 if [ "${1:-}" = "--approve" ]; then APPROVE=1; shift; fi
 
+# Sourced so the registered hook timeout follows the configured TTL. Without
+# this, raising TAILBELL_APPROVE_TTL to 300 in the config left the hook being
+# killed at 120 — and a killed hook is a decision that never arrives, which
+# looks exactly like nobody answering.
+TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
+[ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
+export TAILBELL_APPROVE_TTL="${TAILBELL_APPROVE_TTL:-90}"
+
 NOTIFY="${1:-$HOME/.tailbell/bin/tailbell-notify}"
 [ -x "$NOTIFY" ] || { echo "找不到可执行的 tailbell-notify: $NOTIFY"; exit 1; }
 APPROVER="$(dirname "$NOTIFY")/tailbell-approve"
@@ -102,7 +110,7 @@ merge("PreToolUse", "%s AskUserQuestion" % notify, matcher="AskUserQuestion")
 # killed hook is a decision that never arrives. Comfortably larger, because the
 # TTL is measured from after the push, not before it.
 if want_approve:
-    ttl = int(os.environ.get("TAILBELL_APPROVE_TTL", "90"))
+    ttl = int(os.environ.get("TAILBELL_APPROVE_TTL") or 90)
     merge("PermissionRequest", approver, timeout=ttl + 30)
 else:
     # Registering without --approve must also *un*-register: otherwise turning
