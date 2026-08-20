@@ -7,19 +7,42 @@ Last reviewed: 2026-08-20
 
 ## Now
 
-**Release 8 (`v8-parity`) is code-complete, on GitHub, and green in CI on both
-Linux and macOS.** All four workstreams are built, committed and covered by
-`tests/run-tests.sh`. The macOS install and the per-kind sounds are now verified
-on real hardware. What remains is the half of the verification that needs a
-phone — an optional feature the user has deliberately deferred — plus two
-renderer defects that need the Mac to diagnose. The list is in *Open* below.
+**Release 8 is merged to `main`** (PR #1, 37 commits) and CI is green on
+`ubuntu-latest` and `macos-latest`. The repository now lives on the MacBook as
+well, which is what `docs/MIGRATION.md` was written for — **a session running
+there is the one that can finish this**, and it has started.
 
-**Next step: merge `v8-parity` into `main`.** The phone channels are optional and
-unconfigured by default, so leaving them unverified does not hold back the path
-everyone actually uses.
+**The live problem, being worked on the Mac:** stray notifications keep
+appearing on the workstation — `oneliner · 完成`, `proj-v0 · 完成`,
+`t · 完成 / 1秒 · x (#1)`. Every one is a **test fixture**: `400` seconds is the
+suite's fake turn length and renders as `6m40s`, and `t`/`x`/`#1` are its
+placeholder project, node and session.
 
-Scope and guardrails: [v8-brief.md](v8-brief.md). How it was built, and the
-measurements taken first: [v8-design.md](v8-design.md).
+Two causes, one fixed here and one still on the Mac:
+
+- **Fixed (PR #2, main).** `tests/run-tests.sh` called the real `osascript` and
+  `afplay` on macOS, and its one-liner case ran `packaging/get-tailbell.sh`,
+  which on Darwin runs `mac/install.sh` — writing a LaunchAgent and
+  `launchctl load`ing it, with `HOME` pointed at a throwaway directory. Running
+  the suite on a Mac therefore drew real alerts *and* installed a listener into
+  the tester's own login session. The temp directory was cleaned up; the loaded
+  job was not.
+- **Not fixed.** `mac/install.sh` hardcodes the label `dev.tailbell.listen`, so
+  the rogue registration collides with the real one — only one can hold the
+  label. `KeepAlive` is `true`, so `pkill` is useless; it takes
+  `launchctl bootout gui/$(id -u)/dev.tailbell.listen`. And the rogue job's
+  dedup state lived in the deleted directory, so every reconnect re-delivered
+  the same event. **The label needs a `TAILBELL_HOME` fingerprint, or
+  `mac/install.sh` must refuse to load when `HOME` is not the real one.**
+
+**Also open: sound is inconsistent** — sometimes all three per-kind sounds play
+and are distinguishable, sometimes an alert is silent. The two renderers differ in how
+they make sound (Hammerspoon draws a silent canvas and `play_sound` calls
+`afplay`; the osascript path hangs the sound on the notification, which the
+Script Editor notification settings can mute). `focus_active()` reads
+`~/Library/DoNotDisturb/DB/Assertions.json`, which is **TCC-denied** on that
+machine — whether that failure is being misread as "Focus is on" and swallowing
+the sound is unverified.
 
 ## Execution order — deliberately not the numeric order
 

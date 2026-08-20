@@ -321,6 +321,38 @@ Claude Code reads the hook's pipe, and a child that inherits it keeps the pipe
 open after the parent exits — so the hook appears to hang for exactly as long as
 `curl` does, which is the thing backgrounding was supposed to fix.
 
+### A test suite that installed itself into the tester's login session
+
+Recorded because the failure was invisible where it was written and loud where
+it was not, which is the shape of every macOS bug this project has had.
+
+`packaging/get-tailbell.sh` branches on `uname`. On Darwin it runs
+`mac/install.sh`, which writes `~/Library/LaunchAgents/dev.tailbell.listen.plist`
+and `launchctl load`s it. The one-liner's test case ran that unguarded with
+`HOME` pointed at a `mktemp -d` directory. Three properties then compounded:
+
+1. **The label is hardcoded.** `dev.tailbell.listen` is the same string the real
+   install uses, and a label is unique per session — so the throwaway
+   registration *replaced* the real one rather than sitting beside it.
+2. **`KeepAlive` is `true`**, so killing the process is not removal; launchd
+   restarts it. Only `launchctl bootout` unloads it.
+3. **Its dedup state lived in the temp directory**, which the suite deleted on
+   exit. With nowhere to record what it had already shown, every reconnect
+   re-delivered the same fixtures — the suite's 400-second fake turn, rendering
+   as `跑了 6m40s`, over and over onto a real screen, for days after the test run
+   that created it had finished.
+
+On the cluster none of this is observable: `tailbell-show` is macOS code and the
+desktop sink is unreachable, so every one of those paths is dead code and the
+suite looked clean.
+
+The fix in `tests/run-tests.sh` is the rule the repo already had rather than a
+new one — `uname` is faked to Linux for that one call, and `osascript`, `afplay`
+and `say` go through `tests/fake-desktop` for the whole run, the same seam
+`TAILBELL_CURL` provides for the network. **The label collision itself is not
+fixed**; the label needs a `TAILBELL_HOME` fingerprint, or `mac/install.sh`
+should refuse to load when `HOME` is not the real one.
+
 ## 8. macOS rendering
 
 `osascript` is the guaranteed path: it ships with the OS. Its two traps are
