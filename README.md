@@ -2,7 +2,9 @@
 
 Desktop notifications when Claude Code finishes a turn or blocks waiting for you —
 **including when Claude Code runs over SSH on a shared HPC cluster**, with no
-third-party service, no account and no quota.
+third-party service, no account and no quota. Optional phone channels do exist,
+and each of them *is* a third party — but every one is off until you configure
+it, and the sentence above describes what you get when you configure none.
 
 ```
 ┌──────────────── Great Lakes (headless, shared) ────────────────┐
@@ -246,8 +248,9 @@ Claude Code's own `/usage` already answer it well.
   tailbell — there is no event to hook. Covered in the terminal CLI.
 - **No SSH connection up means silence, not an error.** That is the cost of having
   no third party in the loop, and it is what the optional channels are for.
-- **Sound, voice and Focus detection are untested on macOS.** This release was
-  written on the cluster; see [docs/MIGRATION.md](docs/MIGRATION.md) for what
+- **Voice and Focus detection are still untested on macOS.** The per-kind sounds
+  are verified — all three play and are audibly distinct. The rest of this
+  release was written on the cluster; see [docs/MIGRATION.md](docs/MIGRATION.md) for what
   that blindness has cost before.
 - Tested against Claude Code `2.1.220` on macOS 15 + Rocky 8. Other combinations
   are unverified rather than known-broken.
