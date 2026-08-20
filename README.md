@@ -71,6 +71,8 @@ and rejected.
 - **Each event kind sounds different**, so you can tell "it finished" from "it
   needs you" without looking. One config line silences all of it, and Do Not
   Disturb is respected rather than routed around.
+- **Option + Esc dismisses every alert at once** (Hammerspoon renderer only);
+  each alert's ✕ closes just that one.
 - **Your reply text never leaves the machine.** The `Stop` payload contains
   `last_assistant_message` in full and `PermissionRequest` carries the whole text
   of any question; tailbell reads neither, and a test enforces it.

@@ -59,7 +59,9 @@ ssh <cluster> 'for i in 1 2 3 4 5; do
     | ~/.tailbell/bin/tailbell-notify AskUserQuestion; sleep 1; done'
 ```
 
-**⌥Esc clears the stack.**
+**Option + Esc clears them all** — `⌥`, the key outside Command, not Command
+itself. Global hotkey, so no need to click an alert first. Each alert's ✕ closes
+just that one.
 
 ⚠️ **Do not clean up afterwards by editing `events.log`.** Rewriting that file —
 with an editor, or `grep -v … > tmp && mv` — makes the listener re-read it from
