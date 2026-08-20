@@ -38,72 +38,105 @@ that caused every bug so far.**
 
 ## State on arrival
 
-Verified working, end to end, on Great Lakes → macOS:
+Verified end to end, Great Lakes -> macOS:
 
 - turn finished (>60 s), question asked, cross-login-node delivery
-- centered alert, persists until dismissed, ✕ closes, click focuses the VS Code
-  window that raised it
-- both displays get an identical copy
+- centered alert, persists until dismissed, click focuses the VS Code window that
+  raised it, both displays get a copy, Option+Esc clears the stack
 - fallback to a top-right banner when Hammerspoon is not handling
+- release 8's per-kind sounds: all three play and are audibly distinguishable
+- `mac/install.sh` and `tailbell-doctor --test` both run clean on a real Mac
 
-Never exercised: ⌥Esc bulk clear · `StopFailure` · `Elicitation` · permission
-prompts in the terminal CLI · stack compression when alerts fill the screen ·
-click-to-focus for anything other than VS Code.
+`bash tests/run-tests.sh` — 24 cases when this file was first written; release 8
+took it to 128. CI runs them on `ubuntu-latest` and `macos-latest` on every push.
 
-`bash tests/run-tests.sh` — 24 cases at the time of writing; release 8 took it to 128.
+Never exercised: `StopFailure` · `Elicitation` · alert stack compression ·
+click-to-focus for anything other than VS Code · the spoken alert · a real phone
+subscribed to an ntfy topic · Slack/Discord/Feishu against real endpoints.
 
-## Three problems the migration must solve
+## How to migrate, now that the repository is on GitHub
 
-### 1. Hooks cannot live only on the Mac
+This section replaced an earlier one that described copying the directory. Do
+**not** `scp` the folder: that loses the history, loses every branch, and drags
+along untracked scratch files. The repository is the migration.
 
-Claude Code reads the filesystem of the machine it runs on. A session on Great
-Lakes needs `tailbell-notify` **on Great Lakes**. The Mac becomes the source of
-truth and the deployment origin, not the runtime location.
+```bash
+# on the Mac
+git clone git@github.com:jackiectl2/tailbell.git ~/dev/tailbell
+```
 
-→ Needed: a deploy step that pushes `bin/` and registers hooks on each cluster,
-and a way to tell which clusters are currently in sync.
+Two things that have to be true first:
 
-### 2. `$HOME` is not shared between clusters
+1. **An SSH key on the Mac that GitHub knows.** A key belongs to exactly one
+   account, but an *account* takes any number of keys — so generate a fresh one
+   on the Mac (`ssh-keygen -t ed25519`) and paste it into
+   github.com/settings/keys while signed in as `jackiectl2`. Do not copy the
+   cluster's private key across. Verify with `ssh -T git@github.com` answering
+   *"Hi jackiectl2!"*.
+2. **Nothing under `~/.tailbell` moves.** Runtime state — `config`,
+   `events.log`, `debug.log`, `state/`, `cluster-id` — is per machine and is
+   created by the installer. The Mac already has its own from `mac/install.sh`.
+   Copying the cluster's `cluster-id` over would make the listener think the two
+   machines are the same cluster and drop one of them.
 
-Measured on Great Lakes: `$HOME` is `arcts-gl-home`, specific to that cluster.
-Lighthouse and Armis2 have their own. So "one listener covers everything" holds
-**within** a cluster (Great Lakes' six login nodes do share a home) and **not
-across** them.
+**No paths need editing.** This was checked, not assumed: every script resolves
+its own location from `$0`, and all state hangs off `$TAILBELL_HOME`, which
+defaults to `$HOME/.tailbell`. The only host-specific strings in the repository
+are `mac/install.sh`'s suggested SSH-config pattern and
+`TAILBELL_HOST_PATTERN`, and both are *configuration*, not code.
 
-→ `bin/tailbell-listen` currently calls `pick_host()` and tails **one** host. For
-three clusters it must hold three concurrent streams, each reconnecting
-independently. This is the single largest code change in the migration.
+## What the move actually buys
 
-→ Worth checking first: Turbo (`/nfs/turbo/...`) is mounted on Great Lakes and may
-be mounted on the others. If one Turbo volume is visible from all three, the event
-log could live there and one stream would again cover everything. Armis2 is the
-sensitive-data cluster and probably does **not** share a general Turbo volume —
-verify, do not assume.
+Everything here was written by a session running **on the cluster**, which has no
+macOS. Every macOS behaviour therefore went out untested, and three real bugs
+shipped because of it:
 
-### 3. Armis2 is HIPAA-aligned
+1. A renderer gated on `pgrep Hammerspoon`, which proves the app runs but not that
+   the handler is registered — a failed config load swallowed every notification
+   with no fallback and no trace.
+2. Canvases were created at `(0,0)` — the primary screen's origin — then moved to
+   the target display. With "Displays have separate Spaces" that move silently
+   fails, so alerts landed on a seemingly random screen.
+3. `install.sh` required `flock`, which does not exist on macOS, so it exited 1 on
+   **every** Mac. This one was caught by CI rather than by a user, which is the
+   argument for the macOS runner and for this move in the same breath.
 
-Only project directory names and host names ever leave a machine, and with the
-`file` transport nothing leaves the SSH connection at all — but confirm this is
-acceptable before deploying there. Do not enable the `ntfy` transport on Armis2.
+The Mac is also the only machine present in *every* scenario tailbell is supposed
+to cover. `$HOME` is not shared between clusters — Great Lakes, Lighthouse and
+Armis2 each have their own — so a repository living on Great Lakes is invisible
+to the other two, and invisible to the local Claude Code desktop app, which never
+touches a cluster at all. The workstation is the hub by elimination.
 
-## Tasks
+**What the move does not change:** Claude Code reads the filesystem of the machine
+it runs on, so a session on a cluster still needs `bin/` **on that cluster**. The
+Mac becomes the source of truth and the deployment origin, not the only location.
+`mac/deploy.sh` exists for that.
 
-1. Land this repo on the Mac, history intact, and make it the origin.
-2. Multi-cluster listener: concurrent streams, per-cluster reconnect and backoff,
-   one LaunchAgent. Add tests with a fake `ssh` on `PATH`.
-3. Label events with their cluster, not just `hostname -s`.
-4. `mac/deploy.sh <host>`: copy `bin/`, create `~/.tailbell`, merge hooks into
-   `~/.claude/settings.json`, run `tailbell-doctor` remotely.
-5. Resolve the unknown in `mac/tailbell.lua`: run `tailbellApps()` in the
-   Hammerspoon Console, find the real bundle id of the Claude Code desktop app and
-   of the terminal in use, and fix the `DESKTOP` / `TERMINALS` lists.
-6. Verify click-to-focus for all three frontends: editor, desktop app, terminal.
-7. Update `docs/roadmap.md` — this work spans releases 2, 3 and 4.
+## What is left
+
+Done since this file was first written: the multi-cluster listener (one stream
+per cluster, independent reconnect, `fake-ssh` tests), cluster labelling via
+`~/.tailbell/cluster-id`, `mac/deploy.sh`, and the roadmap update.
+
+Still open, and **both need the Mac** — which is the point:
+
+1. **The bundle ids in `mac/tailbell.lua` are guesses.** `DESKTOP` lists
+   `com.anthropic.claudefordesktop`, `com.anthropic.claude`,
+   `com.anthropic.claudecode`, `com.anthropic.claude-code`; nobody has checked
+   any of them against a running app. Run `tailbellApps()` in the Hammerspoon
+   Console with the desktop app and the terminal open, read the real ids, and fix
+   the lists. Then verify click-to-focus for all three frontends.
+2. **Two rendering defects seen on 2026-08-19 and never diagnosed:** the message
+   line appeared truncated (`… · gl-` cut off), and stacked alerts overlapped
+   each other and the text behind them.
 
 ## Ground rules
 
 - Never a bare `python3`; use `/usr/bin/python3`. The cluster's system Python is
-  3.6.8, so nothing running there may use 3.7+ syntax.
+  3.6.8, so nothing running there may use 3.7+ syntax. The Mac's is current —
+  which makes it *easier* to write something the cluster cannot run. Watch for it.
+- macOS is missing things the cluster has: `flock`, GNU `stat -c`, `timeout`,
+  `readlink -f`. That asymmetry is why every one of those already has a fallback.
 - A hook must never break a session: every path ends in `exit 0`. That makes
   silence the default failure mode, which is why every decision is written to
   `debug.log`. An unlogged early return is a regression.
@@ -115,11 +148,27 @@ acceptable before deploying there. Do not enable the `ntfy` transport on Armis2.
 - Do not enable a third-party transport to make something easier. Release 0 owns
   the zero-dependency guarantee.
 
-## Suggested first prompt
+## Suggested first prompt on the Mac
 
-> Read `docs/MIGRATION.md` and `docs/architecture.md`, then carry out the
-> migration described there. My clusters are Great Lakes (`gl6`), Lighthouse and
-> Armis2 — check my `~/.ssh/config` for the exact host aliases and ask me if any
-> is missing. Start by verifying which of the three share a Turbo volume, because
-> that decides whether the listener needs one stream or three. Work through the
-> task list in order, test on this Mac as you go, and commit after each step.
+> Read `docs/MIGRATION.md`, `docs/STATUS.md` and `docs/architecture.md` before
+> writing anything — architecture.md rules out several obvious-looking changes
+> with measurements, so do not re-propose them.
+>
+> This repository just arrived from a cluster, where it was written by sessions
+> that had no macOS and therefore could not test half of it. You are the first
+> session that can. Start there:
+>
+> 1. Run `bash tests/run-tests.sh` and `bin/tailbell-doctor --test` and tell me
+>    what this machine reports that the cluster could not.
+> 2. Fix the two rendering defects in *What is left* — the truncated message line
+>    and the overlapping stacked alerts.
+> 3. Resolve the bundle ids: run `tailbellApps()` in the Hammerspoon Console with
+>    the Claude Code desktop app and my terminal open, and correct the `DESKTOP`
+>    and `TERMINALS` lists in `mac/tailbell.lua`. Then verify click-to-focus for
+>    the editor, the desktop app and the terminal.
+> 4. Check `mac/deploy.sh` against my other clusters. My aliases are in
+>    `~/.ssh/config`; ask me if one is missing. Verify first whether they share a
+>    Turbo volume, because that decides whether the listener needs one stream or
+>    three.
+>
+> Add a test for anything you fix, commit after each step, and do not push.
