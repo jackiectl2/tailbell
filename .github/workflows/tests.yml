@@ -58,7 +58,32 @@ jobs:
       - name: Test suite
         # No network required, deliberately: every channel goes through
         # tests/fake-curl and the approval round trip through a fake phone.
-        run: bash tests/run-tests.sh
+        #
+        # The result is also written to the job summary. Downloading a job log
+        # needs admin rights on the repository, so a maintainer without a token
+        # — or anyone reading a fork's CI — cannot see *why* a run failed. The
+        # summary is part of the check run and is readable by anyone who can see
+        # the repository, which is the whole point of running these in public.
+        run: |
+          set -o pipefail
+          rc=0
+          bash tests/run-tests.sh 2>&1 | tee "$RUNNER_TEMP/suite.log" || rc=$?
+          {
+            printf '### `tests/run-tests.sh` — %s\n\n' "${{ matrix.os }}"
+            printf '%s / %s / jq %s\n\n' \
+              "$(bash --version | head -1)" "$(/usr/bin/python3 -V 2>&1)" "$(jq --version)"
+            printf '```\n'
+            if [ "$rc" -eq 0 ]; then
+              grep -E '结果:' "$RUNNER_TEMP/suite.log" || tail -5 "$RUNNER_TEMP/suite.log"
+            else
+              # The failing cases first, then enough tail to see where it died.
+              grep -E '❌' "$RUNNER_TEMP/suite.log" || true
+              printf -- '--- last 40 lines ---\n'
+              tail -40 "$RUNNER_TEMP/suite.log"
+            fi
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       - name: The suite must pass with no working curl at all
         # A stronger check than grepping for URLs, and a much less brittle one:
