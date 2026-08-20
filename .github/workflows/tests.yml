@@ -83,6 +83,17 @@ jobs:
             fi
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # Also emit each failing case as a workflow annotation. The job
+          # summary turns out NOT to be exposed on the check run through the
+          # API — `output.summary` comes back null — but annotations are, and
+          # they are readable without repository admin rights. That matters:
+          # a red X you cannot explain is barely better than no CI at all.
+          if [ "$rc" -ne 0 ]; then
+            grep -E '❌' "$RUNNER_TEMP/suite.log" | head -20 | while IFS= read -r line; do
+              printf '::error title=%s::%s\n' "${{ matrix.os }}" "${line//❌/}"
+            done
+          fi
           exit "$rc"
 
       - name: The suite must pass with no working curl at all
