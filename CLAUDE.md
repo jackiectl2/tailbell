@@ -98,8 +98,17 @@ committed.
 
 `main` holds the current stable. Each release in
 [docs/roadmap.md](docs/roadmap.md) gets its own top-level branch
-(`v0-ssh-vscode-chatbox`, `v1-rich-presentation`, …); small experiments branch off
-whichever release they belong to.
+(`v0-ssh-vscode-chatbox`, `v1-rich-presentation`, …).
+
+**A release branch is an integration branch, not a workbench.** Work in progress
+gets its own topic branch off the release branch and comes back with
+`git merge --no-ff`, so the merge commit records what the piece was and the
+piece's own history stays readable. Name them after the work, not the release:
+`v8-verify-guide`, not `v8-parity-2`.
+
+Commit small and often. Each commit should be one reason, stated in the message —
+"why", never "what", the same rule the comments follow. If a commit turns out to
+carry two unrelated fixes, say both in the message rather than letting one hide.
 
 **Release 0 owns the zero-dependency guarantee.** If a later release makes a
 third-party component load-bearing on the v0 path, that is a regression.
