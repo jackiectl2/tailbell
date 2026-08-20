@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stands in for anything that would reach the user's actual screen or speakers:
+# osascript, afplay, say. Records the call and returns success.
+#
+# This exists because the suite drew real alerts on a real Mac. On the cluster
+# where most of it was written, the desktop sink is unreachable and every macOS
+# path is dead code, so nothing was visible; on a Mac the same cases pop an
+# overlay and play a sound at whoever is running the tests. A recorder here is
+# the same seam TAILBELL_CURL already provides for the network.
+#
+# FAKE_DESKTOP_RECORD names the log; without it the call is simply swallowed.
+set -u
+if [ -n "${FAKE_DESKTOP_RECORD:-}" ]; then
+  { printf 'CALL|%s|' "$(basename "$0")"
+    for a in ${@+"$@"}; do printf '%s ' "$a"; done
+    printf '\n'
+  } >> "$FAKE_DESKTOP_RECORD" 2>/dev/null
+fi
+exit 0
