@@ -51,7 +51,9 @@ Everything here needs hardware or a session this branch was written without.
    three real bugs last time.
    *Verified incidentally on 2026-08-19:* the live chain does work — an event
    raised on `gl-login4` reached the Mac and rendered as a centered Hammerspoon
-   overlay, and ⌥Esc bulk clear was exercised for the first time. Two things to
+   overlay, and Option+Esc bulk clear was exercised for the first time — it
+   works, and it is now documented in troubleshooting.md rather than left as a
+   symbol nobody can name. Two things to
    look at when next on that machine: the message line appeared **truncated**
    (`… · gl-` cut off), and stacked alerts overlapped each other and the text
    behind them.

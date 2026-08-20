@@ -135,8 +135,23 @@ Something replaced the remote `events.log`. The listener follows it with
 `tail -F`, which tracks the file **by name**, so a replaced file is reopened and
 read from the beginning — and every line in it arrives as a fresh alert.
 
-It is bounded: it stops when the file has been re-read. **⌥Esc clears the stack**
-if you use the Hammerspoon renderer.
+It is bounded: it stops when the file has been re-read.
+
+**To clear the alerts: press Option + Esc.** That is `⌥`, the key next to the
+space bar on the outside of Command — labelled `⌥`, or `alt` on some keyboards.
+Not Command, not Control. It is a global hotkey, so you do not need to click an
+alert first and it does not matter which app has focus; it dismisses every
+tailbell alert on screen at once. Each alert's own **✕**, top left, closes just
+that one.
+
+This only exists with the Hammerspoon renderer — the centred alerts that stay
+until dismissed. If yours slide in from the top right and fade by themselves,
+that is the `osascript` fallback and there is nothing to clear. If Option + Esc
+does nothing at all, the Hammerspoon config did not load:
+
+```bash
+killall Hammerspoon && open -a Hammerspoon
+```
 
 Do not edit or rewrite `~/.tailbell/events.log` on the agent host — not with an
 editor, not with `grep -v … > tmp && mv`. Appending is fine, and so is deleting
