@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# tailbell-approve — answer a Claude Code permission prompt from your phone.
+#
+# Registered as a `PreToolUse` hook with a matcher you choose. It holds the tool
+# call for a moment, pushes two buttons to a phone, and prints the decision that
+# Claude Code then applies instead of prompting you.
+#
+#   tailbell-approve            with the hook JSON on stdin
+#
+# ---------------------------------------------------------------------------
+# Why PreToolUse and not PermissionRequest
+#
+# `PermissionRequest` is the obvious hook — it is documented as running "before
+# permission prompt" and the runtime carries strings about it allowing and
+# denying. It was the first implementation, and it does not work. Measured on
+# 2.1.160 by driving a real terminal CLI session inside a pty:
+#
+#   PermissionRequest   fires, with the real tool_name and tool_input, before
+#                       the prompt — and the decision a *command* hook prints is
+#                       ignored. allow and deny, four output shapes, all four
+#                       showed the prompt anyway. (`type: prompt` and
+#                       `type: agent` hooks are documented as available on this
+#                       event; a command hook's verdict appears not to be.)
+#   PreToolUse          fires, and its decision IS applied: the write happened
+#                       and no prompt was ever drawn.
+#
+# The cost of that, stated plainly: PreToolUse fires for **every** matching tool
+# call, including ones your allowlist would have approved silently. That is why
+# TAILBELL_APPROVE_TOOLS is required rather than defaulting to everything —
+# without a matcher this would push to your phone hundreds of times a session.
+# Name the few tools you actually get asked about.
+#
+# ---------------------------------------------------------------------------
+# Which frontends this covers
+#
+# The terminal CLI. In the VS Code chat panel the permission UI is handled by the
+# extension itself (upstream #80110) — `PermissionRequest` fires there only for
+# AskUserQuestion, 16 fires measured over two weeks, not one of them a tool
+# permission prompt. docs/architecture.md §1 has the measurement; do not spend
+# time on it again.
+#
+# ---------------------------------------------------------------------------
+# Why there is no inbound port
+#
+# The return path is the same problem SSH RemoteForward already lost to: on a
+# shared login node the loopback interface belongs to every user of the node, so
+# a port is not yours alone and a stranger can hold it. So nothing listens here.
+# The hook POSTs a request out and then polls for the answer — two outbound HTTPS
+# calls, no socket bound, nothing for a neighbour to take.
+#
+# ---------------------------------------------------------------------------
+# What holds the security, stated plainly
+#
+#   1. The approval topic is NOT the notification topic. Day-to-day pushes go to
+#      TAILBELL_NTFY_TOPIC; approvals go to TAILBELL_APPROVE_TOPIC. Someone who
+#      learns the notify topic — from a screenshot, a config, this repo — reads
+#      your project names and cannot approve anything.
+#   2. Each request carries a fresh 128-bit token. A reply is accepted only if it
+#      quotes the token for the request in flight.
+#   3. Replies are matched against a deadline carried in the message's own
+#      timestamp, so a decision that arrives late is rejected explicitly rather
+#      than merely arriving after we stopped looking.
+#   4. Silence is never approval. A timeout prints nothing at all and Claude Code
+#      shows its normal prompt. There is no path where no answer becomes yes.
+#
+# What that does NOT buy: the action buttons must carry the topic and the token,
+# and they travel in the push. Anyone subscribed to your approval topic while a
+# request is live can answer it before you do. On free ntfy.sh a topic cannot be
+# read-protected, so that topic's secrecy is the whole boundary — which is why
+# this is off by default and the README says to point it at an authenticated or
+# self-hosted server.
+#
+# ---------------------------------------------------------------------------
+# What is deliberately not sent
+#
+# The tool NAME ("Bash", "Write"), the project and the host. Never `tool_input` —
+# that is the command line, the file contents, the question text. Approving
+# without seeing the command is weaker than what the terminal gives you, and it
+# is the deliberate trade: this does not put the contents of your work on
+# somebody else's server.
+set -u
+
+EVENT="PreToolUse"
+
+TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
+[ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
+
+DEBUG="${TAILBELL_DEBUG_LOG:-$TAILBELL_HOME/debug.log}"
+STATE_DIR="${TAILBELL_STATE_DIR:-$TAILBELL_HOME/state}"
+
+APPROVE="${TAILBELL_APPROVE:-0}"
+TOPIC="${TAILBELL_APPROVE_TOPIC:-}"
+SERVER="${TAILBELL_APPROVE_SERVER:-${TAILBELL_NTFY_SERVER:-https://ntfy.sh}}"
+TOKEN="${TAILBELL_APPROVE_TOKEN:-${TAILBELL_NTFY_TOKEN:-}}"
+# Long enough to reach for a phone, short enough that someone sitting at the
+# keyboard is not left staring at nothing. Claude Code kills a hook at its
+# configured timeout, so tailbell-register writes one comfortably larger.
+TTL="${TAILBELL_APPROVE_TTL:-90}"
+POLL="${TAILBELL_APPROVE_POLL:-3}"
+# Comma-separated tool names. REQUIRED: this hook runs before every matching
+# tool call, not only the ones that would have prompted, so an empty value would
+# mean asking your phone about all 787 of them.
+TOOLS="${TAILBELL_APPROVE_TOOLS:-}"
+
+CURL="${TAILBELL_CURL:-curl}"
+HTTP_TIMEOUT="${TAILBELL_HTTP_TIMEOUT:-8}"
+HTTP_PROXY_OPT="${TAILBELL_HTTP_PROXY:-}"
+
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+# Every path ends in `exit 0`: a hook must never break the session, and this one
+# runs in front of every permission prompt. Silence being the default failure
+# mode is exactly why each decision is written down instead.
+#
+# NOTHING but the decision JSON may reach stdout — Claude Code parses it, and
+# "Hook output does not start with {" turns a decision into plain text.
+dbg() {
+  printf '%s  %-18s %s\n' "$(date '+%m-%d %H:%M:%S')" "$EVENT" "$*" >> "$DEBUG" 2>/dev/null
+}
+
+payload="$(cat)"
+command -v jq >/dev/null 2>&1 || { dbg "ABORT: jq not on PATH"; exit 0; }
+get() { printf '%s' "$payload" | jq -r "$1 // empty" 2>/dev/null; }
+
+tool="$(get .tool_name)"
+sid="$(get .session_id)"
+cwd="$(get .cwd)"
+proj="${cwd##*/}"; [ -n "$proj" ] || proj="claude"
+short="${sid:0:4}"
+node="$(hostname -s 2>/dev/null || echo '?')"
+
+# tailbell already notifies for AskUserQuestion through its own PreToolUse hook,
+# and answering a multiple-choice question is not something two buttons can do.
+if [ "$tool" = "AskUserQuestion" ]; then
+  dbg "ignored: AskUserQuestion is not a permission decision (already notified separately)"
+  exit 0
+fi
+
+if [ "$APPROVE" != "1" ]; then
+  dbg "approval off (TAILBELL_APPROVE=$APPROVE) — falling through to the local prompt for $tool"
+  exit 0
+fi
+if [ -z "$TOPIC" ]; then
+  dbg "ABORT: TAILBELL_APPROVE=1 but no TAILBELL_APPROVE_TOPIC — falling through to the local prompt"
+  exit 0
+fi
+# Sharing one topic for notifications and approvals would hand approval rights to
+# everyone who can read your "turn finished" pings. Refuse rather than quietly
+# weaken the only boundary this feature has.
+if [ -n "${TAILBELL_NTFY_TOPIC:-}" ] && [ "$TOPIC" = "${TAILBELL_NTFY_TOPIC:-}" ]; then
+  dbg "ABORT: approval topic is the same as the notification topic — anyone who can read your pings could approve. Use a separate topic."
+  exit 0
+fi
+# Required, not optional: see the header. A missing list is a configuration
+# error, and the safe reading of it is "ask about nothing".
+if [ -z "$TOOLS" ]; then
+  dbg "ABORT: TAILBELL_APPROVE=1 but TAILBELL_APPROVE_TOOLS is empty — refusing to ask about every tool call"
+  exit 0
+fi
+case ",$TOOLS," in
+  *",$tool,"*) ;;
+  *) dbg "not in TAILBELL_APPROVE_TOOLS: $tool — falling through to the local prompt"; exit 0 ;;
+esac
+
+# A mode that is already auto-approving does not need a phone, and asking anyway
+# would add a delay to work the user explicitly told Claude Code to just do.
+mode="$(get .permission_mode)"
+case "$mode" in
+  bypassPermissions|acceptEdits|dontAsk|auto|plan)
+    dbg "permission_mode=$mode already decides this — not asking the phone"
+    exit 0 ;;
+esac
+
+# /dev/urandom rather than $RANDOM, which is 15 bits of a seeded PRNG and would
+# make the token guessable — the token is the only thing standing between a
+# stranger on the topic and an approved command.
+rand_hex() { od -An -tx1 -N"$1" /dev/urandom 2>/dev/null | tr -d ' \n'; }
+req="$(rand_hex 4)"
+token="$(rand_hex 16)"
+if [ -z "$req" ] || [ -z "$token" ]; then
+  dbg "ABORT: could not read /dev/urandom — refusing to issue a guessable token"
+  exit 0
+fi
+
+curl_args() {   # shared flags, so the proxy that makes compute nodes work applies to both calls
+  if [ -n "$HTTP_PROXY_OPT" ]; then printf '%s\n%s\n' "--proxy" "$HTTP_PROXY_OPT"; fi
+}
+auth_header() { [ -n "$TOKEN" ] && printf 'Authorization: Bearer %s' "$TOKEN"; }
+
+since="$(date +%s)"
+deadline=$(( since + TTL ))
+
+# The push. Two buttons, each carrying the decision it stands for plus the id and
+# token of THIS request — that triple is what the poll below will accept and
+# nothing else.
+auth="$(auth_header)"
+body="$(jq -nc \
+  --arg topic "$TOPIC" \
+  --arg title "🔑 $proj · 需要你授权" \
+  --arg msg "Claude Code 想用 $tool · $node (#$short)" \
+  --arg url "$SERVER/$TOPIC" \
+  --arg allow "allow $req $token" \
+  --arg deny "deny $req $token" \
+  --arg auth "$auth" \
+  '{topic:$topic, title:$title, message:$msg, priority:5, tags:["key"],
+    actions:[
+      {action:"http", label:"允许", url:$url, method:"POST", body:$allow, clear:true}
+        + (if $auth == "" then {} else {headers:{Authorization:$auth}} end),
+      {action:"http", label:"拒绝", url:$url, method:"POST", body:$deny, clear:true}
+        + (if $auth == "" then {} else {headers:{Authorization:$auth}} end)
+    ]}')" || { dbg "ABORT: could not build the request body"; exit 0; }
+
+pub_code="$(
+  if [ -n "$auth" ]; then
+    "$CURL" -sS -o /dev/null -w '%{http_code}' -m "$HTTP_TIMEOUT" $(curl_args) \
+      -X POST -H "Content-Type: application/json" -H "$auth" \
+      --data-binary "$body" "$SERVER" 2>/dev/null
+  else
+    "$CURL" -sS -o /dev/null -w '%{http_code}' -m "$HTTP_TIMEOUT" $(curl_args) \
+      -X POST -H "Content-Type: application/json" \
+      --data-binary "$body" "$SERVER" 2>/dev/null
+  fi)"
+case "$pub_code" in
+  2*) dbg "asked for approval of $tool (req $req, ${TTL}s) via $SERVER" ;;
+  *)  dbg "FAILED to push approval request: HTTP ${pub_code:-none} — falling through to the local prompt"
+      exit 0 ;;
+esac
+
+# The hookEventName must be the event this hook is registered on. Getting it
+# wrong is silent: Claude Code reads the JSON, finds nothing addressed to the
+# event it just ran, and shows the prompt as if the hook had said nothing.
+decide() {   # decide <allow|deny>
+  jq -nc --arg d "$1" --arg r "$req" --arg t "$tool" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",
+                          permissionDecision:$d,
+                          permissionDecisionReason:("tailbell: " + $d + " from phone (req " + $r + ", tool " + $t + ")")}}'
+}
+
+rejected=0
+polled=0
+# Poll. `since` is stamped before the push, so an answer given faster than the
+# first poll interval is still in the window rather than missed.
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  sleep "$POLL"
+  if [ -n "$auth" ]; then
+    reply="$("$CURL" -sS -m "$HTTP_TIMEOUT" $(curl_args) -H "$auth" \
+             "$SERVER/$TOPIC/json?poll=1&since=$since" 2>/dev/null)"
+  else
+    reply="$("$CURL" -sS -m "$HTTP_TIMEOUT" $(curl_args) \
+             "$SERVER/$TOPIC/json?poll=1&since=$since" 2>/dev/null)"
+  fi
+  prc=$?
+  # A poll that cannot run at all — a 401 on a protected topic, a dead proxy —
+  # produces the same empty string as nobody having answered yet, and then the
+  # same "no decision" ending. Those need telling apart when you are working out
+  # why tapping Allow did nothing. Once, not once per tick.
+  if [ "$prc" != "0" ] && [ "$polled" = 0 ]; then
+    polled=1
+    dbg "poll failed (curl exit $prc) — cannot read $SERVER/$TOPIC; check the topic and TAILBELL_APPROVE_TOKEN"
+  fi
+  [ -n "$reply" ] || continue
+
+  # Newline-delimited JSON, one object per message. Anything that is not exactly
+  # "<allow|deny> <this request> <this token>" is ignored — including our own
+  # request, which is sitting on the same topic.
+  verdict="$(printf '%s\n' "$reply" | jq -rs --arg req "$req" --arg tok "$token" \
+      --argjson deadline "$deadline" '
+      map(select(.event == "message"))
+      | map(select((.message // "") | test("^(allow|deny) " + $req + " " + $tok + "$")))
+      | map(select((.time // 0) <= $deadline))
+      | if length == 0 then "" else (.[0].message | split(" ")[0]) end' 2>/dev/null)"
+
+  case "$verdict" in
+    allow) dbg "APPROVED $tool from phone (req $req)"; decide allow; exit 0 ;;
+    deny)  dbg "DENIED $tool from phone (req $req)";   decide deny;  exit 0 ;;
+  esac
+
+  # A reply that named this request but failed a check is worth saying out loud:
+  # it is either a clock problem or somebody else answering. Once, though — the
+  # poll re-reads the same cached message every few seconds and would otherwise
+  # fill debug.log with one line per tick.
+  if [ "$rejected" = 0 ] && printf '%s\n' "$reply" | grep -q "$req"; then
+    rejected=1
+    dbg "rejected a reply for req $req — wrong token, or timestamped after the ${TTL}s deadline"
+  fi
+done
+
+dbg "no decision within ${TTL}s for $tool (req $req) — falling through to the local prompt"
+exit 0

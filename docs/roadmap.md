@@ -20,7 +20,7 @@ would be wrong.
 | 5 | `v5-claude-and-codex` | Codex as well as Claude Code. **First real architectural step:** an adapter layer, because each agent's event model differs. Needs a stable internal event schema first. | large |
 | 6 | `v6-any-agent` | Arbitrary agents. Generalises release 5's adapter into a documented contract so a new agent is a plugin, not a patch. | large |
 | 7 | `v7-any-os` | Windows as well as macOS: a third renderer (BurntToast or SnoreToast, both of which need an AppId registered first) and a listener that does not assume `launchd`. | large |
-| 8 | `v8-parity` | Everything comparable tools offer and tailbell does not, minus Windows (release 7) and other agents (releases 5–6): supported optional delivery channels, phone-side approval, sound, packaging, usage warnings. Scope and guardrails in [v8-brief.md](v8-brief.md); the field it is measured against in [competitors.md](competitors.md). | medium |
+| 8 | `v8-parity` | Everything comparable tools offer and tailbell does not, minus Windows (release 7) and other agents (releases 5–6): supported optional delivery channels, phone-side approval, sound, packaging, usage warnings. Scope and guardrails in [v8-brief.md](v8-brief.md); how it was built in [v8-design.md](v8-design.md); the field it is measured against in [competitors.md](competitors.md). | ✅ code done, macOS paths unverified |
 
 ## Execution order is not the numeric order
 
@@ -43,6 +43,13 @@ everything can keep speaking Claude Code's payload shape. From release 5 onward 
 schema must be the agent-neutral thing, with per-agent adapters translating into it.
 Getting that boundary right before writing the Codex adapter costs far less than
 retrofitting it after.
+
+**Two features were declined rather than deferred.** Two-way remote control
+([two-way-control.md](two-way-control.md)) and reading the credentials file for
+quota warnings ([usage-quota.md](usage-quota.md)) are not on this roadmap and are
+not meant to arrive later. Each page says what would change the answer, so the
+decision can be reopened on evidence — but neither is a gap waiting for a
+release.
 
 **"Any" is a claim that needs a test matrix, not a wish.** Releases 3, 6 and 7 use
 the word "any". Each needs an explicit, written list of what was actually verified,

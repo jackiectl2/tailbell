@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# tailbell — one entry point for everything else in bin/.
+#
+#   tailbell install            set up this machine for whichever side it is
+#   tailbell doctor [--test]    check every link and name the broken one
+#   tailbell register [--approve]
+#   tailbell deploy <host>...   push the agent side to a cluster (from macOS)
+#   tailbell listen             run the workstation listener in the foreground
+#   tailbell notify <EVENT>     the hook entry point; reads JSON on stdin
+#   tailbell approve            the permission-prompt hook; reads JSON on stdin
+#   tailbell version
+set -u
+
+# This exists so `brew install` and `npx tailbell` are thin wrappers over the
+# same scripts rather than second implementations of them. The packaged install
+# must still produce a working notification with nothing third-party configured,
+# and the surest way to keep that true is for it to run exactly what a git clone
+# runs.
+
+# Resolve through symlinks by hand. Homebrew symlinks bin/tailbell out of
+# libexec and npm symlinks it out of node_modules, so $0 is a link in both of
+# the packaged cases — and `readlink -f` is a GNU extension that older macOS
+# does not have.
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *)  self="$(dirname "$self")/$link" ;;
+  esac
+done
+BIN="$(cd "$(dirname "$self")" && pwd)"
+REPO="$(cd "$BIN/.." && pwd)"
+
+version() {
+  /usr/bin/python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1]))["version"])
+except Exception:
+    print("unknown")' "$REPO/.claude-plugin/plugin.json" 2>/dev/null || echo unknown
+}
+
+# The header comment above IS the usage text, printed up to the first line that
+# is not a comment. A hardcoded line range would drift the first time a
+# subcommand is added.
+usage() { awk 'NR == 1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$self"; }
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+
+case "$cmd" in
+  install)
+    # One command, either side. Which side you are on is not something worth
+    # asking about: the workstation is the one with a screen.
+    if [ "$(uname)" = "Darwin" ]; then exec bash "$REPO/mac/install.sh" "$@"
+    else exec bash "$REPO/install.sh" "$@"; fi ;;
+  doctor)   exec "$BIN/tailbell-doctor" "$@" ;;
+  register) exec "$BIN/tailbell-register" "$@" ;;
+  approve)  exec "$BIN/tailbell-approve" "$@" ;;
+  notify)   exec "$BIN/tailbell-notify" "$@" ;;
+  listen)   exec /usr/bin/python3 "$BIN/tailbell-listen" "$@" ;;
+  deploy)
+    [ "$(uname)" = "Darwin" ] || echo "提示: deploy 通常从工作站跑,这台是 $(uname)" >&2
+    exec bash "$REPO/mac/deploy.sh" "$@" ;;
+  test)     exec "$BIN/tailbell-doctor" --test ;;
+  version|--version|-v) version ;;
+  help|--help|-h) usage ;;
+  *)
+    echo "不认识的子命令: $cmd" >&2
+    echo >&2
+    usage >&2
+    exit 2 ;;
+esac

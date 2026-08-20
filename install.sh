@@ -12,8 +12,9 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 TB="$HOME/.tailbell"
 
 echo "==> 1/3 检查依赖"
+# Required: without these the hook can do nothing at all.
 missing=""
-for t in jq flock hostname stat tee date; do
+for t in jq hostname stat tee date; do
   command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
 done
 if [ -n "$missing" ]; then
@@ -21,7 +22,22 @@ if [ -n "$missing" ]; then
   echo "       tailbell 会静默失效。装上再来。"
   exit 1
 fi
-echo "    jq / flock / coreutils 都在"
+
+# flock is NOT required, and treating it as required made this script exit 1 on
+# every Mac — macOS has no flock(1) at all, so the agent side could not be
+# installed on the machine release 4 exists to support. Caught by CI on
+# macos-latest, which is what that runner is for.
+#
+# What it actually buys: serialising concurrent sessions appending to one log on
+# a shared NFS $HOME. That is the cluster case. Without it the sink falls back to
+# a plain append, which is fine on a local filesystem.
+if command -v flock >/dev/null 2>&1; then
+  echo "    jq / flock / coreutils 都在"
+else
+  echo "    jq / coreutils 都在"
+  echo "    ⚠️  没有 flock(macOS 本来就没有)—— 并发写日志退回普通追加。"
+  echo "       本地文件系统上没问题;共享 NFS 上多个会话同时写才需要它。"
+fi
 
 echo "==> 2/3 建立 $TB"
 mkdir -p "$TB/state"
@@ -29,21 +45,75 @@ if [ ! -f "$TB/config" ]; then
   cat > "$TB/config" <<'EOF'
 # tailbell agent config.
 #
-# transport:
-#   file  — append events to events.log; the workstation tails it over the SSH
-#           connection your editor already holds. No third party, no quota.
-#   ntfy  — POST to an ntfy server; reaches you with no SSH session up, at the
-#           cost of a third party seeing project names.
-TAILBELL_TRANSPORT="file"
+# ---------------------------------------------------------------------------
+# Channels: where a notification is sent. A comma-separated list; every name in
+# it is tried, and a failure in one never stops another.
+#
+#   file    — append to events.log; the workstation tails it over the SSH
+#             connection your editor already holds. No third party, no account,
+#             no quota, and it works from compute nodes because $HOME is one
+#             shared NFS mount. This is the guaranteed path: leave it in.
+#   ntfy    — push to a phone, reaches you with every editor closed.
+#   slack / discord / feishu — post to an incoming webhook.
+#
+# Everything after `file` puts a third party in the path, which is why none of
+# it is on by default. Leave TAILBELL_CHANNELS commented out and tailbell
+# behaves exactly as it did before channels existed.
+#TAILBELL_CHANNELS="file,ntfy"
+TAILBELL_TRANSPORT="file"          # legacy name for a single channel; still honoured
 
 # Turns shorter than this are not worth interrupting you for — you were watching.
 TAILBELL_MIN_SECONDS=60
 
-# Only read when transport=ntfy. The topic IS the password: make it long and
-# random, and note that a free ntfy.sh account cannot reserve (privatise) it.
+# ---------------------------------------------------------------------------
+# ntfy. THE TOPIC IS THE PASSWORD: anyone who knows it reads every notification
+# you send, so make it long and random —
+#     head -c 18 /dev/urandom | base64 | tr -d '/+='
+# and note that a *free* ntfy.sh account cannot reserve or privatise a topic.
+# Measured: limits.basis is "ip" for a free account exactly as for an anonymous
+# one — same 250/day, still metered on this login node's shared address.
 #TAILBELL_NTFY_TOPIC=""
 #TAILBELL_NTFY_SERVER="https://ntfy.sh"
 #TAILBELL_NTFY_TOKEN=""
+
+# ---------------------------------------------------------------------------
+# Webhooks. Each of these URLs *is* a credential — whoever holds it can post as
+# you. This file is chmod 600 for that reason; keep it that way, and remember a
+# shared login node has other people's root on it.
+#TAILBELL_SLACK_WEBHOOK=""
+#TAILBELL_DISCORD_WEBHOOK=""
+#TAILBELL_FEISHU_WEBHOOK=""
+#TAILBELL_FEISHU_SECRET=""        # only if the bot is in "signed request" mode
+
+# ---------------------------------------------------------------------------
+# Compute nodes reach the outside through ARC's preset http_proxy and curl picks
+# that up on its own. Set this only to override a preset one that is wrong.
+#TAILBELL_HTTP_PROXY=""
+#TAILBELL_HTTP_TIMEOUT=8
+
+# ---------------------------------------------------------------------------
+# Approve or deny a permission prompt from your phone. Terminal CLI only — in
+# the VS Code chat panel there is no permission event to hook (measured; see
+# docs/architecture.md §1).
+#
+# Register the hook with:  tailbell-register --approve
+# Then turn it on here. Both steps are needed, deliberately: this hook holds the
+# tool call for up to TTL seconds while it waits for you, which is what you want
+# when you are away from the keyboard and not what you want when you are at it.
+#
+# TAILBELL_APPROVE_TOOLS is REQUIRED and doubles as the hook's matcher. The hook
+# runs before every matching tool call, not only the ones that would have
+# prompted, so an empty list means a phone push hundreds of times a session —
+# tailbell-register refuses without it.
+#
+# THE APPROVAL TOPIC MUST NOT BE THE NOTIFICATION TOPIC. Anyone who can read the
+# topic can answer the prompt, and your notification topic is the one that ends
+# up in screenshots. tailbell refuses to run if you set them to the same value.
+#TAILBELL_APPROVE=0
+#TAILBELL_APPROVE_TOPIC=""        # a SECOND, long random topic, not the one above
+#TAILBELL_APPROVE_TOKEN=""        # ntfy auth token — strongly recommended here
+#TAILBELL_APPROVE_TTL=90
+#TAILBELL_APPROVE_TOOLS="Bash,Write"   # required; also the hook matcher
 EOF
   chmod 600 "$TB/config"
   echo "    写入 $TB/config"
@@ -52,40 +122,14 @@ else
 fi
 
 echo "==> 3/3 注册 hooks 到 ~/.claude/settings.json"
-# Resolve the interpreter first. A bare `python3` would pick up whatever
-# virtualenv is active, which on this cluster is a per-project .venv.
-PY=/usr/bin/python3
-[ -x "$PY" ] || PY="$(command -v python3 || echo python3)"
-"$PY" - "$REPO" <<'PYEOF'
-import json, pathlib, shutil, sys, time
-repo = sys.argv[1]
-p = pathlib.Path.home()/".claude"/"settings.json"
-cfg = {}
-if p.exists():
-    shutil.copy(p, str(p) + ".bak." + time.strftime("%Y%m%d-%H%M%S"))
-    cfg = json.loads(p.read_text())
-N = "%s/bin/tailbell-notify" % repo
-h = cfg.setdefault("hooks", {})
-
-def merge(ev, arg, matcher=None):
-    """Replace any existing tailbell entry for this event, keep everyone else's."""
-    entry = {"hooks": [{"type": "command", "command": "%s %s" % (N, arg)}]}
-    if matcher:
-        entry["matcher"] = matcher
-    kept = [e for e in (h.get(ev) or [])
-            if "tailbell-notify" not in " ".join(
-                x.get("command", "") for x in e.get("hooks", []))]
-    h[ev] = kept + [entry]
-
-merge("Stop", "Stop")
-merge("UserPromptSubmit", "UserPromptSubmit")
-merge("SessionEnd", "SessionEnd")
-merge("Notification", "Notification")
-merge("PreToolUse", "AskUserQuestion", matcher="AskUserQuestion")
-p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text(json.dumps(cfg, indent=2) + "\n")
-print("    已合并 (旧文件已备份,其他 hook 保留)")
-PYEOF
+# Delegated to tailbell-register rather than repeated here. Keeping a second
+# copy of the merge meant this script registered five events while the register
+# script registered seven — so StopFailure and Elicitation silently did nothing
+# for anyone who installed the documented way. It also creates
+# ~/.tailbell/cluster-id, which the workstation listener uses to open exactly one
+# stream per cluster; without that file the listener skips the host entirely and
+# you get silence with every other check green.
+bash "$REPO/bin/tailbell-register" "$REPO/bin/tailbell-notify" | sed 's/^/    /'
 
 cat <<DONE
 

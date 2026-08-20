@@ -1,0 +1,110 @@
+name: tests
+
+# macOS is in this matrix for one reason: everything in this repository was
+# written on a Linux cluster, and docs/MIGRATION.md records three real bugs that
+# shipped because no macOS was in reach. A runner is not a substitute for
+# testing the notification on a real screen — it cannot see a banner or hear a
+# sound — but it does run the same scripts under the same /bin/bash 3.2 and the
+# same BSD userland, which is where two of those three bugs actually lived.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the shell and interpreters actually in use
+        # Worth printing rather than assuming: macOS runners still ship bash
+        # 3.2.57, which is the version the array and `local` idioms here have to
+        # survive, and it is the one a contributor on Linux never sees.
+        run: |
+          bash --version | head -1
+          /bin/bash --version | head -1
+          /usr/bin/python3 -V
+          jq --version
+          command -v flock || echo "flock: absent (expected on macOS)"
+          command -v timeout || echo "timeout: absent (expected on macOS)"
+
+      - name: Every shell file must parse
+        # Two real syntax errors have reached commits in this repository,
+        # including a doubled here-document that parses as a truncated file.
+        run: |
+          fail=0
+          for f in $(git ls-files); do
+            case "$f" in
+              *.sh|bin/tailbell*|tests/fake-*) ;;
+              *) continue ;;
+            esac
+            head -1 "$f" | grep -q bash || continue
+            bash -n "$f" || { echo "SYNTAX ERROR: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: The listener must parse on the cluster's Python too
+        # 3.6.8 is what Great Lakes runs. `text=True` slipped in once and the
+        # failure was silent, so this is checked rather than trusted.
+        run: /usr/bin/python3 -m py_compile bin/tailbell-listen
+
+      - name: Test suite
+        # No network required, deliberately: every channel goes through
+        # tests/fake-curl and the approval round trip through a fake phone.
+        #
+        # The result is also written to the job summary. Downloading a job log
+        # needs admin rights on the repository, so a maintainer without a token
+        # — or anyone reading a fork's CI — cannot see *why* a run failed. The
+        # summary is part of the check run and is readable by anyone who can see
+        # the repository, which is the whole point of running these in public.
+        run: |
+          set -o pipefail
+          rc=0
+          bash tests/run-tests.sh 2>&1 | tee "$RUNNER_TEMP/suite.log" || rc=$?
+          {
+            printf '### `tests/run-tests.sh` — %s\n\n' "${{ matrix.os }}"
+            printf '%s / %s / jq %s\n\n' \
+              "$(bash --version | head -1)" "$(/usr/bin/python3 -V 2>&1)" "$(jq --version)"
+            printf '```\n'
+            if [ "$rc" -eq 0 ]; then
+              grep -E '结果:' "$RUNNER_TEMP/suite.log" || tail -5 "$RUNNER_TEMP/suite.log"
+            else
+              # The failing cases first, then enough tail to see where it died.
+              grep -E '❌' "$RUNNER_TEMP/suite.log" || true
+              printf -- '--- last 40 lines ---\n'
+              tail -40 "$RUNNER_TEMP/suite.log"
+            fi
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Also emit each failing case as a workflow annotation. The job
+          # summary turns out NOT to be exposed on the check run through the
+          # API — `output.summary` comes back null — but annotations are, and
+          # they are readable without repository admin rights. That matters:
+          # a red X you cannot explain is barely better than no CI at all.
+          if [ "$rc" -ne 0 ]; then
+            grep -E '❌' "$RUNNER_TEMP/suite.log" | head -20 | while IFS= read -r line; do
+              printf '::error title=%s::%s\n' "${{ matrix.os }}" "${line//❌/}"
+            done
+          fi
+          exit "$rc"
+
+      - name: The suite must pass with no working curl at all
+        # A stronger check than grepping for URLs, and a much less brittle one:
+        # put a curl on PATH that refuses to connect, and run the whole suite
+        # again. Everything that reaches outside is supposed to go through an
+        # injectable command, so nothing should notice. A case that quietly
+        # started making live requests would pass on a laptop and fail here.
+        run: |
+          mkdir -p "$RUNNER_TEMP/nonet"
+          printf '#!/bin/sh\necho "curl: (7) refused by CI" >&2\nexit 7\n' \
+            > "$RUNNER_TEMP/nonet/curl"
+          chmod +x "$RUNNER_TEMP/nonet/curl"
+          PATH="$RUNNER_TEMP/nonet:$PATH" bash tests/run-tests.sh

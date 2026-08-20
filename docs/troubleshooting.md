@@ -82,9 +82,11 @@ knowing about immediately, however short the turn.
 
 ## I am never told about permission prompts
 
-Not fixable in the VS Code chat panel: `Notification` and `PermissionRequest` both
-fire **zero** times there. There is no event to hook. They work in the terminal CLI,
-where tailbell reports them as `🔑 需要你授权`.
+Not fixable in the VS Code chat panel. `Notification` fires **zero** times there.
+`PermissionRequest` does fire — but measured over two weeks, every single one was
+`AskUserQuestion`, never a tool permission prompt, because the extension handles
+those itself. There is no event to hook. Both work in the terminal CLI, where
+tailbell reports them as `🔑 需要你授权`.
 
 ## Two windows on different login nodes, and I cannot tell which rang
 
@@ -93,11 +95,12 @@ node is missing, the agent side is running an older build.
 
 ## I need notifications with every editor closed
 
-The default transport has no third party, and therefore no way to reach you with no
-SSH session up. Switch transports in `~/.tailbell/config`:
+The default path has no third party, and therefore no way to reach you with no SSH
+session up. Add a channel in `~/.tailbell/config` — it sits alongside the default
+rather than replacing it:
 
 ```sh
-TAILBELL_TRANSPORT="ntfy"
+TAILBELL_CHANNELS="file,ntfy"
 TAILBELL_NTFY_TOPIC="<long random string>"
 ```
 
@@ -105,10 +108,120 @@ Two things to know before you do: the topic **is** the password and a free ntfy.
 account cannot make it private, and the free quota is metered per source IP — which
 on a shared login node means shared with everyone on that node.
 
+`TAILBELL_TRANSPORT="ntfy"` from before release 8 still works and means the same
+thing as `TAILBELL_CHANNELS="ntfy"`.
+
+## A channel is configured but nothing arrives on it
+
+`tailbell-doctor` checks each one and names the broken link; `--test` sends a real
+message through every channel and quotes back what the server said.
+
+| what the doctor says | meaning |
+| --- | --- |
+| `SKIPPED ntfy: no TAILBELL_NTFY_TOPIC` | the channel is listed but not configured |
+| `连不上主机` | no route out. On a **compute node** that means `http_proxy`; ARC presets it, so check it survived into the job's environment |
+| `FAILED slack: HTTP 403 — invalid_token` | the webhook was revoked or is for another workspace |
+| `FAILED feishu: … sign match fail` | the bot is in signed mode; set `TAILBELL_FEISHU_SECRET` |
+| `FAILED …: HTTP 000, curl exit 6` | DNS. Usually a proxy that is set but wrong |
+| `不认识的通道名 'ntfy '` | a stray space or a typo in `TAILBELL_CHANNELS` |
+| nothing at all in `debug.log` | the hook never ran — see the first section |
+
+Delivery is verified from a Great Lakes **compute node** through ARC's proxy, so
+`sbatch` jobs can reach a phone. Login nodes reach ntfy.sh directly.
+
+## Every notification I have ever received just appeared again, all at once
+
+Something replaced the remote `events.log`. The listener follows it with
+`tail -F`, which tracks the file **by name**, so a replaced file is reopened and
+read from the beginning — and every line in it arrives as a fresh alert.
+
+It is bounded: it stops when the file has been re-read.
+
+**To clear the alerts: press Option + Esc.** That is `⌥`, the key next to the
+space bar on the outside of Command — labelled `⌥`, or `alt` on some keyboards.
+Not Command, not Control. It is a global hotkey, so you do not need to click an
+alert first and it does not matter which app has focus; it dismisses every
+tailbell alert on screen at once. Each alert's own **✕**, top left, closes just
+that one.
+
+This only exists with the Hammerspoon renderer — the centred alerts that stay
+until dismissed. If yours slide in from the top right and fade by themselves,
+that is the `osascript` fallback and there is nothing to clear. If Option + Esc
+does nothing at all, the Hammerspoon config did not load:
+
+```bash
+killall Hammerspoon && open -a Hammerspoon
+```
+
+Do not edit or rewrite `~/.tailbell/events.log` on the agent host — not with an
+editor, not with `grep -v … > tmp && mv`. Appending is fine, and so is deleting
+it outright. tailbell's own rotation moves the old file to `events.log.1` and
+leaves an empty one precisely to avoid this, and the listener refuses events
+older than `TAILBELL_MAX_AGE` (300 s) as a second line of defence — you will see
+`dropped an event … old` in `/tmp/tailbell.err`. A flood despite that means an
+agent host running a build older than release 8.
+
+## The phone never gets the Allow / Deny buttons
+
+Check, in this order:
+
+1. **Is it registered?** `tailbell register --approve`. Registering is separate
+   from enabling on purpose, and it refuses to run until
+   `TAILBELL_APPROVE_TOOLS` is set — that list is also the hook's matcher.
+2. **Is it on?** `TAILBELL_APPROVE=1` *and* `TAILBELL_APPROVE_TOPIC` in the config.
+   Both are required.
+3. **Is it the terminal CLI?** In the chat panel there is no permission event, so
+   nothing will ever fire. This is the same limitation as the section above.
+4. **Are the two topics different?** tailbell refuses to run when the approval
+   topic equals the notification topic, and says so in `debug.log`. Anyone who can
+   read a topic can answer the prompt, and your notification topic is the one that
+   ends up in screenshots.
+5. **Is the tool in the list?** `TAILBELL_APPROVE_TOOLS` is required, and
+   `debug.log` names the tool it skipped. It is the hook's matcher too, so a tool
+   missing from it never reaches tailbell at all.
+6. **Is the session already auto-approving?** The hook returns immediately when
+   `permission_mode` is `acceptEdits`, `bypassPermissions`, `dontAsk`, `auto` or
+   `plan` — there is nothing to decide, and `debug.log` says so.
+
+`debug.log` records every request and every rejected reply, including *why* it was
+rejected — wrong token, wrong request, or timestamped past the deadline.
+
+## I tapped Allow and nothing happened
+
+If more than `TAILBELL_APPROVE_TTL` seconds (90 by default) passed, the request had
+already expired and Claude Code fell back to its own prompt. That is deliberate: a
+decision that arrives late must be inert rather than applied to whatever prompt
+happens to be open by then.
+
+If it was well inside the window, look for `rejected a reply` in `debug.log`. The
+usual cause is a clock skew between the phone and the cluster large enough that the
+reply's own timestamp lands past the deadline.
+
+## The alerts are too loud, or all sound the same
+
+```sh
+TAILBELL_SOUND=0                  # silence everything
+TAILBELL_SOUND_DONE=Submarine     # or change just one
+TAILBELL_VOICE=question,permission   # speak only when something waits on you
+```
+
+If every event sounds identical, the agent side is older than the workstation
+side — `kind` is what selects the sound and an old build does not emit it. Redeploy
+the agent side.
+
+Sound and speech are held back while a Focus mode is on. If that detection is wrong
+on your macOS version, replace it rather than disabling it:
+
+```sh
+TAILBELL_FOCUS_CMD="/path/to/a/command that exits 0 when Focus is on"
+```
+
 ## Uninstall
 
-Agent side — drop the tailbell entries from `~/.claude/settings.json` (every
-install backs the file up first), or uninstall the plugin. Then:
+Agent side — re-run `tailbell register` **without** `--approve` to remove the
+permission hook, then drop the remaining tailbell entries from
+`~/.claude/settings.json` (every install backs the file up first), or uninstall
+the plugin. Then:
 
 ```bash
 rm -rf ~/.tailbell

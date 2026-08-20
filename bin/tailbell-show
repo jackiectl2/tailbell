@@ -4,7 +4,7 @@
 # arrived from a remote host, and directly by tailbell-notify when Claude Code is
 # running locally.
 #
-# Usage: tailbell-show <title> <message> [urgent] [project] [app] [entrypoint]
+# Usage: tailbell-show <title> <message> [urgent] [project] [app] [entrypoint] [kind]
 #
 #   project    — project directory name; the renderer matches it against window
 #                titles so a click focuses the window that raised the alert.
@@ -12,6 +12,9 @@
 #                it out (local sessions only).
 #   entrypoint — the frontend kind Claude Code reports; survives SSH, so it is all
 #                a remote session can offer.
+#   kind       — done | question | permission | idle | error. What happened, as
+#                opposed to how it is worded. The sound is chosen from this, so
+#                the three cases are distinguishable without looking.
 #
 # Renderers, in order. The guarantee of this version is the last one: osascript
 # ships with macOS, so the zero-dependency path always exists. The two above it
@@ -41,13 +44,120 @@ urgent="${3:-}"
 project="${4:-}"
 app="${5:-}"
 entrypoint="${6:-}"
+kind="${7:-}"
 
 # Never a bare `python3`: with a virtualenv active that resolves to whichever
 # interpreter the current project happens to use.
 PY=/usr/bin/python3
 
+# Config lives on the workstation for this script — it is the display layer, and
+# how loud a notification is has nothing to do with the machine that raised it.
+TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
+[ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
+
 RECEIPT="${TAILBELL_RECEIPT:-$HOME/.tailbell/receipt}"
 renderer="${TAILBELL_RENDERER:-auto}"
+
+# Seams, so the sound paths can be regression-tested off a Mac. Same idea as
+# TAILBELL_CURL in the sinks: point them at a recorder and assert on what would
+# have been run.
+OSASCRIPT="${TAILBELL_OSASCRIPT:-/usr/bin/osascript}"
+AFPLAY="${TAILBELL_AFPLAY:-/usr/bin/afplay}"
+SAY="${TAILBELL_SAY:-/usr/bin/say}"
+
+########################################################################
+# Sound
+#
+# Four of the tools in docs/competitors.md have per-event sounds and two speak
+# the message; tailbell was silent, which on a busy screen is the difference
+# between seeing an alert and not. One sound for everything would be barely
+# better than none — the point is telling "it finished" from "it needs you"
+# without looking, so every event kind gets its own.
+#
+# All five ship in /System/Library/Sounds, so this costs no dependency, and each
+# is overridable (TAILBELL_SOUND_DONE=Submarine). TAILBELL_SOUND=0 silences the
+# lot.
+########################################################################
+SOUND="${TAILBELL_SOUND:-1}"
+case "$kind" in
+  question)   snd="${TAILBELL_SOUND_QUESTION:-Ping}"       ; spoken="在等你回答" ;;
+  permission) snd="${TAILBELL_SOUND_PERMISSION:-Sosumi}"   ; spoken="需要授权"   ;;
+  error)      snd="${TAILBELL_SOUND_ERROR:-Basso}"         ; spoken="出错了"     ;;
+  idle)       snd="${TAILBELL_SOUND_IDLE:-Tink}"           ; spoken="在等你输入" ;;
+  *)          snd="${TAILBELL_SOUND_DONE:-Glass}"          ; spoken="完成"       ;;
+esac
+[ "$SOUND" = "0" ] && snd=""
+
+# Do Not Disturb / Focus is a thing the user switched on deliberately. A
+# notification banner already respects it — macOS holds it back — but `afplay`
+# and `say` do not, and would be the one part of tailbell that routes around a
+# choice the user made. So they are gated on this.
+#
+# TAILBELL_FOCUS_CMD is the whole detection, overridable: Apple has moved where
+# this lives more than once, and a user on a version we guessed wrong about
+# should be able to substitute a command that works rather than wait for a patch.
+# It is also how the tests exercise both branches.
+#
+# ⚠️ UNTESTED — written on a Linux cluster with no macOS in reach. See
+# docs/MIGRATION.md for why that warning is on everything macOS here.
+focus_active() {
+  [ "${TAILBELL_RESPECT_FOCUS:-1}" = "1" ] || return 1
+  if [ -n "${TAILBELL_FOCUS_CMD:-}" ]; then
+    $TAILBELL_FOCUS_CMD >/dev/null 2>&1
+    return $?
+  fi
+  # macOS 12+: an active Focus leaves an assertion record in this plist. The
+  # records live under data[0], but the shape has moved between releases, so try
+  # the nested keypath and then the bare one rather than betting on either.
+  # UNTESTED on any macOS — if it is wrong on yours, TAILBELL_FOCUS_CMD replaces
+  # the whole check rather than requiring a patch.
+  local dnd="$HOME/Library/DoNotDisturb/DB/Assertions.json"
+  if [ -f "$dnd" ]; then
+    for keypath in data.0.storeAssertionRecords storeAssertionRecords; do
+      # An empty array means "no Focus is on", and plutil prints that as `0` for
+      # `raw` on an empty list — so the presence of the key is not the answer,
+      # its contents are.
+      case "$(/usr/bin/plutil -extract "$keypath" raw -o - "$dnd" 2>/dev/null)" in
+        ""|0) ;;
+        *) return 0 ;;
+      esac
+    done
+  fi
+  # Before Monterey it was a single default.
+  [ "$(/usr/bin/defaults -currentHost read com.apple.notificationcenterui doNotDisturb 2>/dev/null)" = "1" ] \
+    && return 0
+  return 1
+}
+
+# Only for renderers that cannot make a sound themselves. Where the OS draws the
+# notification it also plays the sound, and that path respects Focus for free —
+# playing it ourselves as well would double it up and defeat the point.
+play_sound() {
+  [ -n "$snd" ] || return 0
+  focus_active && return 0
+  "$AFPLAY" "/System/Library/Sounds/$snd.aiff" >/dev/null 2>&1 &
+}
+
+# Off by default: a machine that talks out loud in a shared office is a different
+# product. Only the project and what happened are ever spoken — never the message
+# text, for the same reason it is never POSTed.
+#
+# TAILBELL_VOICE=1 speaks every kind; a comma list speaks only those
+# (TAILBELL_VOICE="question,permission" is the useful setting — speak when you
+# are being waited on, stay quiet when something merely finished).
+speak() {
+  local want="${TAILBELL_VOICE:-0}"
+  [ "$want" = "0" ] && return 0
+  if [ "$want" != "1" ]; then
+    case ",$want," in *",${kind:-done},"*) ;; *) return 0 ;; esac
+  fi
+  focus_active && return 0
+  if [ -n "${TAILBELL_VOICE_NAME:-}" ]; then
+    "$SAY" -v "$TAILBELL_VOICE_NAME" "${project:-Claude} $spoken" >/dev/null 2>&1 &
+  else
+    "$SAY" "${project:-Claude} $spoken" >/dev/null 2>&1 &
+  fi
+}
 
 if [ "$renderer" = "auto" ] || [ "$renderer" = "hammerspoon" ]; then
   if pgrep -x Hammerspoon >/dev/null 2>&1 && [ -f "$RECEIPT" ]; then
@@ -55,12 +165,17 @@ if [ "$renderer" = "auto" ] || [ "$renderer" = "hammerspoon" ]; then
     nonce="$$-$(date +%s)-$RANDOM"
     u=0; [ -n "$urgent" ] && u=1
     # -g keeps Hammerspoon in the background so the alert never steals focus.
-    open -g "hammerspoon://tailbell?title=$(q "$title")&message=$(q "$message")&urgent=$u&project=$(q "$project")&app=$(q "$app")&entrypoint=$(q "$entrypoint")&nonce=$nonce" >/dev/null 2>&1
+    open -g "hammerspoon://tailbell?title=$(q "$title")&message=$(q "$message")&urgent=$u&project=$(q "$project")&app=$(q "$app")&entrypoint=$(q "$entrypoint")&kind=$(q "$kind")&nonce=$nonce" >/dev/null 2>&1
 
     # ~1.2s is long enough for a live handler and short enough that a dead one
     # still gets you notified promptly by the fallback below.
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-      [ "$(cat "$RECEIPT" 2>/dev/null)" = "$nonce" ] && exit 0
+      if [ "$(cat "$RECEIPT" 2>/dev/null)" = "$nonce" ]; then
+        # The canvas is silent by construction — Hammerspoon draws it, macOS
+        # does not, so nothing plays a sound unless we do.
+        play_sound; speak
+        exit 0
+      fi
       sleep 0.1
     done
   fi
@@ -68,15 +183,28 @@ fi
 
 if [ "$renderer" = "auto" ] || [ "$renderer" = "alerter" ]; then
   if command -v alerter >/dev/null 2>&1; then
-    alerter -title "$title" -message "$message" -sound Glass -group "$title" \
-      >/dev/null 2>&1 && exit 0
+    # alerter plays it through the notification itself, which is what respects
+    # Focus. "none" is its documented way of asking for silence.
+    if alerter -title "$title" -message "$message" -sound "${snd:-none}" \
+               -group "$title" >/dev/null 2>&1; then
+      speak; exit 0
+    fi
   fi
 fi
 
 # json.dumps produces a literal that is also valid in AppleScript, so quotes,
 # backslashes and CJK text all survive being embedded in the script text.
 lit() { "$PY" -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$1"; }
-/usr/bin/osascript -e \
-  "display notification $(lit "$message") with title $(lit "$title") sound name \"Glass\"" \
-  >/dev/null 2>&1
+# The sound rides on the notification rather than being played separately: that
+# is the path macOS holds back under Focus, and holding it back is the point.
+if [ -n "$snd" ]; then
+  "$OSASCRIPT" -e \
+    "display notification $(lit "$message") with title $(lit "$title") sound name $(lit "$snd")" \
+    >/dev/null 2>&1
+else
+  "$OSASCRIPT" -e \
+    "display notification $(lit "$message") with title $(lit "$title")" \
+    >/dev/null 2>&1
+fi
+speak
 exit 0

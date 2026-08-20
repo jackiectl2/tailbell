@@ -4,6 +4,18 @@
 # the workstation for local sessions.
 #
 #   tailbell-register [path-to-tailbell-notify]
+#   tailbell-register --approve [path-to-tailbell-notify]
+#
+# --approve additionally registers a second PreToolUse hook, matched to the tools
+# named in TAILBELL_APPROVE_TOOLS, which lets you answer from your phone. It is
+# separate because that hook holds the tool call for up to TAILBELL_APPROVE_TTL
+# seconds while it waits, which is only what you want when you are away from the
+# keyboard. Off by default in the config as well, so registering it is not enough
+# to turn it on.
+#
+# PreToolUse rather than PermissionRequest: measured on 2.1.160, a command hook's
+# decision is applied on PreToolUse and ignored on PermissionRequest. See
+# tailbell-approve's header and docs/architecture.md §7.
 #
 # Split out of the deploy script on purpose: doing this inline over ssh meant
 # nesting a Python program inside single quotes inside a remote command, which is
@@ -11,8 +23,30 @@
 # has none of those problems, and can be tested on its own.
 set -euo pipefail
 
+APPROVE=0
+if [ "${1:-}" = "--approve" ]; then APPROVE=1; shift; fi
+
+# Sourced so the registered hook timeout follows the configured TTL. Without
+# this, raising TAILBELL_APPROVE_TTL to 300 in the config left the hook being
+# killed at 120 — and a killed hook is a decision that never arrives, which
+# looks exactly like nobody answering.
+TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
+[ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
+export TAILBELL_APPROVE_TTL="${TAILBELL_APPROVE_TTL:-90}"
+export TAILBELL_APPROVE_TOOLS="${TAILBELL_APPROVE_TOOLS:-}"
+if [ "$APPROVE" = 1 ] && [ -z "$TAILBELL_APPROVE_TOOLS" ]; then
+  # Refused rather than defaulted. This hook runs before every tool call it
+  # matches, not only the ones that would have prompted, so no matcher means
+  # pushing to a phone hundreds of times a session.
+  echo "--approve 需要先在 $TAILBELL_HOME/config 里设 TAILBELL_APPROVE_TOOLS" >&2
+  echo '例如: TAILBELL_APPROVE_TOOLS="Bash,Write,Edit"' >&2
+  echo '(它同时是 hook 的 matcher;留空等于每次工具调用都问你手机,所以不给默认值)' >&2
+  exit 1
+fi
+
 NOTIFY="${1:-$HOME/.tailbell/bin/tailbell-notify}"
 [ -x "$NOTIFY" ] || { echo "找不到可执行的 tailbell-notify: $NOTIFY"; exit 1; }
+APPROVER="$(dirname "$NOTIFY")/tailbell-approve"
 
 # A cluster's login nodes share one $HOME, so this file is identical on all of
 # them and different between clusters. The listener groups hosts by it and opens
@@ -29,10 +63,12 @@ fi
 PY=/usr/bin/python3
 [ -x "$PY" ] || PY="$(command -v python3 || echo python3)"
 
-"$PY" - "$NOTIFY" <<'PYEOF'
-import json, pathlib, shutil, sys, time
+"$PY" - "$NOTIFY" "$APPROVE" "$APPROVER" <<'PYEOF'
+import json, os, pathlib, shutil, sys, time
 
 notify = sys.argv[1]
+want_approve = sys.argv[2] == "1"
+approver = sys.argv[3]
 p = pathlib.Path.home() / ".claude" / "settings.json"
 cfg = {}
 if p.exists():
@@ -42,13 +78,16 @@ if p.exists():
 hooks = cfg.setdefault("hooks", {})
 
 
-def merge(event, arg, matcher=None):
+def merge(event, command, matcher=None, timeout=None):
     """Replace our own entry for this event, leaving every other tool's alone.
 
     Rewriting the whole event would silently delete hooks belonging to other
     plugins, which is the kind of damage you only notice weeks later.
     """
-    entry = {"hooks": [{"type": "command", "command": "%s %s" % (notify, arg)}]}
+    hook = {"type": "command", "command": command}
+    if timeout:
+        hook["timeout"] = timeout
+    entry = {"hooks": [hook]}
     if matcher:
         entry["matcher"] = matcher
     def ours(e):
@@ -56,21 +95,62 @@ def merge(event, arg, matcher=None):
         # cc-notify.sh is the pre-tailbell prototype these scripts grew out of.
         # Leaving it registered would fire two notifications per event, so the
         # switchover drops it here rather than asking anyone to hand-edit JSON.
-        return "tailbell-notify" in cmds or "cc-notify.sh" in cmds
+        return ("tailbell-notify" in cmds or "tailbell-approve" in cmds
+                or "cc-notify.sh" in cmds)
 
     kept = [e for e in (hooks.get(event) or []) if not ours(e)]
     hooks[event] = kept + [entry]
+
+
+def drop_approver(event):
+    """Remove our entry for an event without touching anybody else's."""
+    kept = [e for e in (hooks.get(event) or [])
+            if "tailbell-approve" not in " ".join(
+                x.get("command", "") for x in e.get("hooks", []))]
+    if kept:
+        hooks[event] = kept
+    else:
+        hooks.pop(event, None)
 
 
 # Stop / UserPromptSubmit fire everywhere. Notification and StopFailure only fire
 # in some frontends, but cost nothing where they do not. See docs/architecture.md.
 for event in ("Stop", "UserPromptSubmit", "SessionEnd", "Notification",
               "StopFailure", "Elicitation"):
-    merge(event, event)
-merge("PreToolUse", "AskUserQuestion", matcher="AskUserQuestion")
+    merge(event, "%s %s" % (notify, event))
+merge("PreToolUse", "%s AskUserQuestion" % notify, matcher="AskUserQuestion")
+
+# The approval hook blocks while it waits for a phone, so it needs a timeout
+# larger than the wait itself — Claude Code kills a hook at its timeout, and a
+# killed hook is a decision that never arrives. Comfortably larger, because the
+# TTL is measured from after the push, not before it.
+matcher = ""
+if want_approve:
+    ttl = int(os.environ.get("TAILBELL_APPROVE_TTL") or 90)
+    tools = os.environ.get("TAILBELL_APPROVE_TOOLS", "")
+    matcher = "|".join(t.strip() for t in tools.split(",") if t.strip())
+    # A *second* PreToolUse entry with its own matcher, not a replacement for the
+    # AskUserQuestion one: both matter, and they match different tools.
+    entry = {"matcher": matcher,
+             "hooks": [{"type": "command", "command": approver,
+                        "timeout": ttl + 30}]}
+    kept = [e for e in (hooks.get("PreToolUse") or [])
+            if "tailbell-approve" not in " ".join(
+                x.get("command", "") for x in e.get("hooks", []))]
+    hooks["PreToolUse"] = kept + [entry]
+else:
+    # Registering without --approve must also *un*-register: otherwise turning
+    # the feature off means editing JSON by hand, and a hook that runs in front
+    # of tool calls is not one to leave lying around. PermissionRequest is where
+    # an earlier version of this put it.
+    drop_approver("PreToolUse")
+    drop_approver("PermissionRequest")
 
 p.parent.mkdir(parents=True, exist_ok=True)
 p.write_text(json.dumps(cfg, indent=2) + "\n")
 print("已注册 %d 个事件 -> %s" % (len(hooks), notify))
+if want_approve:
+    print("手机审批已注册 (PreToolUse matcher=%s -> tailbell-approve)" % matcher)
+    print("还要在 config 里设 TAILBELL_APPROVE=1 和 TAILBELL_APPROVE_TOPIC 才会生效")
 print("(设置是热加载的,不用重启 Claude Code)")
 PYEOF

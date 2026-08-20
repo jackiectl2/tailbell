@@ -47,6 +47,19 @@ ONLY = os.environ.get("TAILBELL_HOST_PATTERN", "")
 
 RESCAN_SECONDS = 20
 
+# Refuse to announce an event that already happened a while ago.
+#
+# `tail -n0 -F` starts at end of file, so history is never read on purpose — but
+# tail follows BY NAME, and anything that replaces the file makes it reopen and
+# read from the beginning. Log rotation used to do exactly that, and the result
+# was every retained line delivered again as a fresh alert. The rotation is fixed;
+# this is the guard that does not depend on the sender being fixed, because the
+# sender is on a different machine and may be an older version.
+#
+# Generous, because the two clocks are not the same clock: the timestamp is
+# stamped on the agent host and compared here.
+MAX_AGE_SECONDS = int(os.environ.get("TAILBELL_MAX_AGE", "300"))
+
 # `test -f` first: tailing a host where tailbell was never installed would create
 # state there and stream nothing. Exiting immediately lets us mark it and back off.
 REMOTE_CMD = ("test -f ~/{log} && exec tail -n0 -F ~/{log}".format(log=REMOTE_LOG))
@@ -137,11 +150,17 @@ def already_shown(rec):
     return False
 
 
-def show(title, message, urgent=False, project="", app="", entrypoint=""):
-    """Hand off to tailbell-show, which owns how the alert is drawn."""
+def show(title, message, urgent=False, project="", app="", entrypoint="",
+         kind=""):
+    """Hand off to tailbell-show, which owns how the alert is drawn.
+
+    `kind` is what the renderer picks a sound from, so an older tailbell-show
+    that ignores a seventh argument degrades to the previous behaviour instead
+    of breaking — which is what a half-updated pair of machines looks like.
+    """
     if os.access(SHOW, os.X_OK):
         argv = [SHOW, title, message, "urgent" if urgent else "",
-                project or "", app or "", entrypoint or ""]
+                project or "", app or "", entrypoint or "", kind or ""]
     else:
         argv = ["/usr/bin/osascript", "-e",
                 'display notification %s with title %s sound name "Glass"'
@@ -156,9 +175,13 @@ def show(title, message, urgent=False, project="", app="", entrypoint=""):
 
 def stream_once(host):
     """Tail one host until the connection ends. True if any event arrived."""
+    # universal_newlines, not text=: `text` is 3.7+, and this file must stay
+    # runnable on the cluster's 3.6.8 as well as on the Mac. It was not — and the
+    # handler in watch() swallowed the TypeError, so the host was silently never
+    # streamed while every other check reported green.
     proc = subprocess.Popen(["ssh"] + SSH_OPTS + [host, REMOTE_CMD],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            text=True, bufsize=1)
+                            universal_newlines=True, bufsize=1)
     got = False
     for line in proc.stdout:
         line = line.strip()
@@ -169,6 +192,16 @@ def stream_once(host):
         except ValueError:
             continue
         got = True
+        ts = rec.get("ts")
+        if isinstance(ts, (int, float)) and time.time() - ts > MAX_AGE_SECONDS:
+            # Say so rather than dropping it silently: launchd routes this to
+            # /tmp/tailbell.err, which tailbell-doctor prints.
+            sys.stderr.write(
+                "tailbell-listen: %s: dropped an event %ds old (%s) — the remote "
+                "log was probably replaced\n"
+                % (host, int(time.time() - ts), rec.get("title", "")))
+            sys.stderr.flush()
+            continue
         if already_shown(rec):
             continue
         show(rec.get("title") or "Claude Code",
@@ -176,7 +209,8 @@ def stream_once(host):
              urgent=(rec.get("priority") == "high"),
              project=rec.get("project") or "",
              app=rec.get("app") or "",
-             entrypoint=rec.get("entrypoint") or "")
+             entrypoint=rec.get("entrypoint") or "",
+             kind=rec.get("kind") or "")
     proc.wait()
     return got
 
@@ -192,8 +226,13 @@ def watch(host, stop):
         try:
             stream_once(host)
             backoff = 5
-        except Exception:
-            pass
+        except Exception as exc:
+            # Say so. `pass` here once hid a TypeError that stopped every host
+            # from being streamed, and the only symptom was silence. launchd
+            # sends this to /tmp/tailbell.err, which tailbell-doctor already
+            # shows you.
+            sys.stderr.write("tailbell-listen: %s: %r\n" % (host, exc))
+            sys.stderr.flush()
         if stop.wait(backoff):
             return
         backoff = min(backoff * 2, 60)
