@@ -267,3 +267,47 @@ Each lands as its own commit, tests included, `bash -n` first.
 6. approval (`tailbell-approve`, `PermissionRequest` wiring, `--approve` registration)
 7. `bin/tailbell` dispatcher, brew formula, npm package, one-line installer
 8. docs: README, architecture correction, the two decision pages, STATUS
+
+## 8. What changed while building it
+
+Kept here rather than edited into the sections above, so the design as argued and
+the design as built can be compared.
+
+**Added, not designed:**
+
+- **CI, with `macos-latest` in the matrix.** Not in the plan, and the most useful
+  thing in the release. A runner cannot see a banner or hear a sound, but it runs
+  these scripts under the same `/bin/bash` 3.2 and the same BSD userland — which
+  is where the bugs below actually lived.
+- **`tests/fake-ssh`.** The listener had no coverage at all because everything it
+  does goes through `ssh`. Writing that stand-in immediately turned up a bug.
+
+**Four bugs found by writing the tests, none of which release 8 introduced:**
+
+- `install.sh` registered five events where `tailbell-register` registers seven,
+  and never wrote `~/.tailbell/cluster-id` — so the install the README documents
+  produced silence with every other check green.
+- `tailbell-listen` passed `text=True`, which is Python 3.7+, and `watch()`
+  swallowed the TypeError. The host was simply never streamed.
+- `stat -c` is GNU only, so neither log ever rotated on a Mac.
+- `flock` does not exist on macOS, so the `file` sink could not work there at all.
+
+The pattern in the last three is the same one `docs/MIGRATION.md` is about, and it
+is why the CI job exists now rather than in release 7.
+
+**Changed from the design:**
+
+- The Focus check tries `data.0.storeAssertionRecords` *and* the bare key, and
+  treats an empty list as "no Focus", rather than betting on one shape of a plist
+  nobody here can open.
+- `tailbell-register` sources the config, because the hook timeout it writes has
+  to follow `TAILBELL_APPROVE_TTL`; without that, raising the TTL produced a hook
+  Claude Code kills before it can answer.
+- `get-tailbell.sh` clones and then checks out, rather than `clone --branch`,
+  which accepts only a branch or a tag — not a commit.
+
+**Not built, deliberately:** a generic `webhook` sink. It would be ten lines and
+would cover Teams, but Teams' Power Automate endpoint wants an Adaptive Card, not
+a text field, so "generic" would have been a fifth shape rather than one fewer.
+Each channel also costs a doctor row and test cases. Adding it is a table entry
+whenever somebody actually wants it.
