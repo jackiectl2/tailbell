@@ -591,6 +591,29 @@ check "install.sh 成功退出" "$?" "0"
 if [ -s "$IH/.tailbell/cluster-id" ]; then ok "install.sh 生成 cluster-id (没有它监听器会跳过这台机器)"
 else no "install.sh 没生成 cluster-id —— 监听器会静默跳过这台机器"; fi
 
+# The one-liner is the path most new users will take, and it was the only entry
+# point with no coverage at all. Cloned from this working tree at this commit, so
+# it needs no network either.
+OH="$TMP/onelinerhome"; mkdir -p "$OH"
+HOME="$OH" TAILBELL_REPO="$REPO" TAILBELL_DIR="$OH/tailbell" \
+  TAILBELL_BRANCH="$(git -C "$REPO" rev-parse HEAD)" \
+  bash "$REPO/packaging/get-tailbell.sh" >/dev/null 2>&1
+if [ -s "$OH/.tailbell/cluster-id" ] && [ -x "$OH/tailbell/bin/tailbell-notify" ]; then
+  ok "一行安装脚本能装出一个完整的 agent 侧"
+else no "一行安装脚本没装成"; fi
+# And that what it installed actually notifies, which is the claim being made.
+s=$(sid o001)
+mkdir -p "$OH/.tailbell/state"; echo $(( $(date +%s) - 400 )) > "$OH/.tailbell/state/$s.start"
+# Every TAILBELL_* the suite exports has to come off for this one: the point is
+# what a fresh machine does with nothing but what the installer wrote.
+printf '{"session_id":"%s","cwd":"/x/oneliner"}' "$s" \
+  | env -u TAILBELL_CHANNELS -u TAILBELL_TRANSPORT -u TAILBELL_LOG \
+        -u TAILBELL_DEBUG_LOG -u TAILBELL_STATE_DIR -u TAILBELL_MIN_SECONDS \
+        HOME="$OH" TAILBELL_HOME="$OH/.tailbell" \
+        "$OH/tailbell/bin/tailbell-notify" Stop
+if [ -s "$OH/.tailbell/events.log" ]; then ok "并且装完就能发出一条通知"
+else no "装完发不出通知"; fi
+
 evs="$(/usr/bin/python3 -c "
 import json
 h = json.load(open('$IH/.claude/settings.json'))['hooks']

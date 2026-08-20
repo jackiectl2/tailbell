@@ -68,7 +68,7 @@ worth avoiding, not the omission itself.
 - **Short turns stay silent** (60 s gate, configurable). No surveyed tool has a
   duration threshold at all.
 - A doctor that checks every link in the chain — now including each configured
-  channel, end to end — and a 113-case regression suite that needs no network:
+  channel, end to end — and a 116-case regression suite that needs no network:
   channels run through a recorded fake `curl`, and the approval round trip
   through a fake phone that presses the button on whatever was just pushed.
 - Optional channels that are genuinely optional. Configure none and the

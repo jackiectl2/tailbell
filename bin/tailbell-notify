@@ -236,13 +236,18 @@ sink_file() { # release 0's path: one JSON line on the shared NFS home.
     dbg "FAILED writing $LOGFILE: jq produced nothing"
     return 1
   fi
+  # if/else rather than `cmd && dbg ... || dbg ...`: dbg's own exit status is the
+  # rotation check inside it, so a failed rotation would run the || branch too
+  # and log a write failure that never happened.
+  local wrote=1
   if command -v flock >/dev/null 2>&1; then
-    printf '%s\n' "$line" | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1 \
-      && dbg "EMITTED to $LOGFILE: $title" || dbg "FAILED writing $LOGFILE"
+    printf '%s\n' "$line" | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1 || wrote=0
+    if [ "$wrote" = 1 ]; then dbg "EMITTED to $LOGFILE: $title"
+    else dbg "FAILED writing $LOGFILE"; fi
   else
-    printf '%s\n' "$line" >> "$LOGFILE" 2>/dev/null \
-      && dbg "EMITTED to $LOGFILE: $title (no flock on this platform)" \
-      || dbg "FAILED writing $LOGFILE"
+    printf '%s\n' "$line" >> "$LOGFILE" 2>/dev/null || wrote=0
+    if [ "$wrote" = 1 ]; then dbg "EMITTED to $LOGFILE: $title (no flock on this platform)"
+    else dbg "FAILED writing $LOGFILE"; fi
   fi
   if [ "$(file_size "$LOGFILE")" -gt 1048576 ]; then
     tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE"
