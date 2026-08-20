@@ -690,8 +690,18 @@ printf '{"session_id":"%s","cwd":"/x/oneliner"}' "$s" \
         -u TAILBELL_DEBUG_LOG -u TAILBELL_STATE_DIR -u TAILBELL_MIN_SECONDS \
         HOME="$OH" TAILBELL_HOME="$OH/.tailbell" \
         "$OH/tailbell/bin/tailbell-notify" Stop
-if [ -s "$OH/.tailbell/events.log" ]; then ok "并且装完就能发出一条通知"
-else no "装完发不出通知"; fi
+# Where that notification lands is platform-dependent, and asserting the log file
+# everywhere is how this failed on macOS: with no channel configured a Mac
+# resolves to `desktop` and draws the alert locally, which is correct — there is
+# nothing to transport to. Same split as the release 0 case above.
+if [ "$(uname)" = "Darwin" ]; then
+  if grep -q 'SHOWN' "$OH/.tailbell/debug.log" 2>/dev/null; then
+    ok "并且装完就能发出一条通知 (macOS:本机渲染)"
+  else no "装完发不出通知 (macOS 上应走本机渲染)"; fi
+else
+  if [ -s "$OH/.tailbell/events.log" ]; then ok "并且装完就能发出一条通知"
+  else no "装完发不出通知"; fi
+fi
 
 evs="$(/usr/bin/python3 -c "
 import json
