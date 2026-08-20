@@ -12,6 +12,13 @@ are done.
 
 ## 1. The workstation — macOS
 
+> **Done — 2026-08-20.** `mac/install.sh` completed, `tailbell-doctor --test`
+> ran green, and the three per-kind sounds were played and **told apart without
+> looking at the screen**, which is the claim the design rests on. Left over from
+> this section: the two rendering problems below, and the Focus/DND check, which
+> needs Focus actually switched on. Kept here as the procedure to re-run after
+> any change to `mac/tailbell.lua` or the sound map.
+
 Run this **on the Mac, from a Mac-local terminal** — not the editor's integrated
 terminal, which in a Remote-SSH window is on the cluster.
 

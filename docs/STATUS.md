@@ -3,15 +3,20 @@
 Hand-written intent. Everything computable (branch, dirty files, commits behind)
 comes from the session-start hook instead — never restate it here.
 
-Last reviewed: 2026-08-19
+Last reviewed: 2026-08-20
 
 ## Now
 
-**Release 8 (`v8-parity`) is code-complete and untested on macOS.** All four
-workstreams are built, committed and covered by `tests/run-tests.sh`; what is
-missing is the half of the verification that needs a Mac and a phone, and one
-measurement that needs an interactive terminal CLI. The list is in *Open* below —
-it is short and specific, and nothing merges to `main` until it is worked through.
+**Release 8 (`v8-parity`) is code-complete, on GitHub, and green in CI on both
+Linux and macOS.** All four workstreams are built, committed and covered by
+`tests/run-tests.sh`. The macOS install and the per-kind sounds are now verified
+on real hardware. What remains is the half of the verification that needs a
+phone — an optional feature the user has deliberately deferred — plus two
+renderer defects that need the Mac to diagnose. The list is in *Open* below.
+
+**Next step: merge `v8-parity` into `main`.** The phone channels are optional and
+unconfigured by default, so leaving them unverified does not hold back the path
+everyone actually uses.
 
 Scope and guardrails: [v8-brief.md](v8-brief.md). How it was built, and the
 measurements taken first: [v8-design.md](v8-design.md).
@@ -45,18 +50,27 @@ wherever they touch.
 
 Everything here needs hardware or a session this branch was written without.
 
-1. **Most macOS paths are unverified.** Sound per event kind, the Focus/DND
-   check, the spoken alert, and the doctor's sound self-test were all written on
-   the cluster. `docs/MIGRATION.md` records that this exact blindness shipped
-   three real bugs last time.
+1. **The macOS install and the sounds are verified; two renderer questions are
+   not.** Confirmed on the user's Mac on 2026-08-20: `mac/install.sh` completes,
+   `tailbell-doctor --test` runs green on the workstation side, and the doctor's
+   sound self-test plays all three per-kind sounds — **and they are audibly
+   distinguishable without looking at the screen**, which was the whole point of
+   choosing per-kind sounds rather than one bell. That closes the largest part of
+   the blindness `docs/MIGRATION.md` warns about, and it is why macOS is now in
+   CI rather than trusted.
+
+   Still unverified on macOS: the Focus/DND check (needs Focus actually on) and
+   the spoken alert (off by default, so nobody has heard it).
+
    *Verified incidentally on 2026-08-19:* the live chain does work — an event
    raised on `gl-login4` reached the Mac and rendered as a centered Hammerspoon
    overlay, and Option+Esc bulk clear was exercised for the first time — it
    works, and it is now documented in troubleshooting.md rather than left as a
-   symbol nobody can name. Two things to
-   look at when next on that machine: the message line appeared **truncated**
+   symbol nobody can name. **Two renderer defects seen that day are still
+   unfixed and unreproduced:** the message line appeared **truncated**
    (`… · gl-` cut off), and stacked alerts overlapped each other and the text
-   behind them.
+   behind them. Both are in `mac/tailbell.lua`, both need the Mac to diagnose,
+   and neither blocks the merge.
 2. **Approval is verified against a real session — except the phone itself.**
    Driving a terminal CLI session inside a pty showed that `PermissionRequest`'s
    decision is ignored and `PreToolUse`'s is applied; the path was moved and then
@@ -68,33 +82,38 @@ Everything here needs hardware or a session this branch was written without.
    came back off the topic intact (architecture.md §7). What is untested is the
    last hop — an actual phone subscribed to the topic — and the Slack, Discord
    and Feishu webhooks, which need real endpoints to point at.
-4. **Nothing is published.** No git push, no tag, no brew tap, no npm publish. The
-   formula is deliberately HEAD-only until a tag exists.
-5. **The project moved to a second GitHub account, `jackiectl2`.** The original
+4. **Published to GitHub, but not released.** `main` and `v8-parity` are pushed
+   to `github-jackiectl2:jackiectl2/tailbell.git`, and CI is green on both
+   `ubuntu-latest` and `macos-latest`. What does not exist yet is a *release*:
+   no tag, no brew tap, no npm publish. The formula is deliberately HEAD-only
+   until a tag exists, so nothing downstream is waiting on this.
+
+   The macOS half of CI paid for itself on its first run, catching two bugs the
+   cluster could never have shown: `install.sh` required `flock`, which does not
+   exist on macOS, so it exited 1 on *every* Mac — a break sitting directly on
+   release 4's goal — and a test asserted the Linux default channel on both
+   platforms.
+
+5. **The project lives on a second GitHub account, `jackiectl2`.** The original
    `jackiectl` is flagged: invisible to anonymous requests (profile, user API and
    numeric-id lookup all 404 while `torvalds` resolves from the same host) and
-   its API quota is zero, so `gh` cannot act on it. Plain git still worked there,
+   its API quota is zero, so `gh` cannot act on it. Plain git still works there,
    which is why its other repositories keep pushing.
 
-   Done: every published URL now points at `jackiectl2`, the whole history was
-   rewritten to that account's noreply address (GitHub attributes commits by
-   email, and nothing had ever been pushed, so this was free), `user.email` is
-   set **repo-locally** so the account's other repositories keep their own
-   identity, and `origin` is `github-jackiectl2:jackiectl2/tailbell.git`.
+   Every published URL points at `jackiectl2`, the whole history was rewritten to
+   that account's noreply address (GitHub attributes commits by email, and
+   nothing had ever been pushed, so this was free), and `user.email` is set
+   **repo-locally** so the account's other repositories keep their own identity.
+   The pre-rewrite commits are still in `refs/original/`; to undo the whole
+   thing, `git reset --hard refs/original/refs/heads/<branch>` per branch.
 
-   The pre-rewrite commits are still in `refs/original/`. To undo the whole
-   thing: `git reset --hard refs/original/refs/heads/<branch>` per branch.
+   Do **not** add a `Host github.com` block to `~/.ssh/config` here — Rocky 8's
+   `Match final all` re-parses against the resolved `HostName`, so it leaks the
+   old key into the alias and authenticates as the wrong account. Verify identity
+   with `ssh -T github-jackiectl2`, never over HTTP.
 
-   **Two things left, and neither can be done from here:**
-   - The **public key must be added to `jackiectl2`** — GitHub allows a key on
-     one account only, so the existing `~/.ssh/id_ed25519` authenticates as
-     `jackiectl` and always will. A second key pair
-     (`~/.ssh/id_ed25519_jackiectl2`) and an `~/.ssh/config` alias
-     (`github-jackiectl2`) are already in place; the key just needs pasting into
-     github.com/settings/keys while signed in as `jackiectl2`.
-   - The **repository must be created in a browser** at github.com/new, named
-     `tailbell`, with no README/.gitignore/licence — GitHub does not create one
-     on push, and creating one needs the API.
+   Left to the user, and deliberately not automated: the About description and
+   ~20 topics on the repository page.
 
 ## Open — older, still true
 
