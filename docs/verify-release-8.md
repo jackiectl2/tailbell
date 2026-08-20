@@ -50,7 +50,8 @@ Both were seen on 2026-08-19 and neither has been diagnosed:
   than tiling. Related to the stack-compression path that has never been
   exercised.
 
-Reproduce by raising several alerts quickly:
+Reproduce by raising several alerts quickly. **This really does ring the bell** —
+five alerts will appear on your screen:
 
 ```bash
 ssh <cluster> 'for i in 1 2 3 4 5; do
@@ -59,6 +60,13 @@ ssh <cluster> 'for i in 1 2 3 4 5; do
 ```
 
 **⌥Esc clears the stack.**
+
+⚠️ **Do not clean up afterwards by editing `events.log`.** Rewriting that file —
+with an editor, or `grep -v … > tmp && mv` — makes the listener re-read it from
+the beginning and replay *every* notification in it. That is not a quirk of
+editing; it is why rotation was changed in this release. See
+[troubleshooting.md](troubleshooting.md). Appending is safe, and so is deleting
+the file outright.
 
 ### Sound off, and Focus
 
