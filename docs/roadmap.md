@@ -14,7 +14,7 @@ would be wrong.
 | --- | --- | --- | --- |
 | 0 | `v0-ssh-vscode-chatbox` | Claude Code over SSH in the VS Code chat panel → notification on macOS. Zero third-party software or service. | ✅ done |
 | 1 | `v1-rich-presentation` | Centered, clickable overlay: close button, fade in/out, click to focus the originating editor window. Hammerspoon as an **optional** dependency; release 0's zero-dependency path stays the guarantee. | small |
-| 2 | `v2-ssh-terminal-cli` | Claude Code CLI in an SSH terminal. Mostly already working — the addition is `Notification`, which fires in the CLI and covers permission prompts that the chat panel cannot report. | small |
+| 2 | `v2-ssh-terminal-cli` | Claude Code CLI in an SSH terminal. The addition is `Notification`, which fires in the CLI and covers permission prompts the chat panel cannot report. **Verified end to end 2026-08-20** — a permission prompt on `gl-login4` drew the 🔑 alert on the Mac. | ✅ done |
 | 3 | `v3-ssh-any-frontend` | Any editor, terminal or MCP frontend over SSH. Largely documentation and a test matrix rather than new code, for the same reason: hooks are process-level. | small |
 | 4 | `v4-local-and-remote` | Same behaviour whether Claude Code runs on the cluster or on the Mac. The local path already exists; this release is about making one install cover both without branching config. | medium |
 | 5 | `v5-claude-and-codex` | Codex as well as Claude Code. **First real architectural step:** an adapter layer, because each agent's event model differs. Needs a stable internal event schema first. | large |

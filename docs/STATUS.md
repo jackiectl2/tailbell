@@ -117,9 +117,19 @@ Everything here needs hardware or a session this branch was written without.
 
 ## Open — older, still true
 
-- **Never exercised, still:** `StopFailure` · `Elicitation` ·
-  permission prompts in the terminal CLI · alert stack compression · click-to-focus
-  for anything other than VS Code.
+- **Never exercised, still:** `StopFailure` · `Elicitation` · alert stack
+  compression · click-to-focus for anything other than VS Code.
+- **Permission prompts in the terminal CLI: verified 2026-08-20.** A CLI session
+  on `gl-login4` was made to edit a tracked source file, `Notification` fired with
+  `notification_type=permission_prompt`, the event reached `events.log`, and the
+  Mac drew the 🔑 alert. That is release 2's one distinct capability — the chat
+  panel has no event for this — confirmed end to end for the first time.
+
+  **Two earlier attempts failed and both were the test's fault, not the code's.**
+  `uptime` and `touch /tmp/…` are auto-approved by Claude Code without raising a
+  permission event at all, so nothing fired and the run looked like a tailbell
+  bug. Anyone re-testing this must pick an action Claude Code will genuinely
+  stop on — editing a tracked file works.
 - The prototype this grew out of still sits in `~/.claude/hooks/` (`cc-notify.sh`,
   `cc-hammerspoon.lua`, `gl-listen.py`, …). It is dead code on a live machine —
   easy to edit by mistake. One part of it is **not** dead: `probe.sh` is still

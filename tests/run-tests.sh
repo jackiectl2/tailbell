@@ -24,6 +24,15 @@ export TAILBELL_LOG="$TMP/events.log"
 export TAILBELL_DEBUG_LOG="$TMP/debug.log"
 export TAILBELL_STATE_DIR="$TMP/state"
 export TAILBELL_MIN_SECONDS=60
+# Nothing in this suite may reach the screen or the speakers. On the cluster that
+# was free -- every macOS path is dead code there -- so it went unnoticed until
+# the suite was run on a real Mac and popped overlays at the person running it.
+# Same seam as TAILBELL_CURL, for the same reason.
+export TAILBELL_OSASCRIPT="$REPO/tests/fake-desktop"
+export TAILBELL_AFPLAY="$REPO/tests/fake-desktop"
+export TAILBELL_SAY="$REPO/tests/fake-desktop"
+export TAILBELL_RENDERER="osascript"   # never probe for a live Hammerspoon
+export FAKE_DESKTOP_RECORD="$TMP/desktop.log"
 mkdir -p "$TAILBELL_STATE_DIR"
 : > "$TAILBELL_LOG"
 
@@ -392,6 +401,15 @@ export TAILBELL_CHANNELS="file"
 ########################################################################
 echo
 echo "── 声音与语音 ──"
+# The seams must be pointed at the recorder for the whole run, not just inside
+# the cases below. Without this the suite passes identically on the cluster and
+# draws real overlays on a Mac -- which is exactly how it shipped.
+if [ "$TAILBELL_OSASCRIPT" = "$REPO/tests/fake-desktop" ] \
+   && [ "$TAILBELL_AFPLAY" = "$REPO/tests/fake-desktop" ] \
+   && [ "$TAILBELL_SAY" = "$REPO/tests/fake-desktop" ] \
+   && [ -x "$REPO/tests/fake-desktop" ]; then
+  ok "屏幕与扬声器的三个出口全程指向录音器"
+else no "有出口没被拦住 —— 在 Mac 上跑会弹真弹窗"; fi
 #
 # tailbell-show is macOS code, and this suite runs on the cluster. What IS
 # testable here is every decision it makes before touching a Mac API: which
@@ -674,12 +692,30 @@ else no "install.sh 没生成 cluster-id —— 监听器会静默跳过这台�
 # point with no coverage at all. Cloned from this working tree at this commit, so
 # it needs no network either.
 OH="$TMP/onelinerhome"; mkdir -p "$OH"
+# ⚠️ The one-liner branches on `uname`, and on Darwin it runs mac/install.sh,
+# which writes a LaunchAgent and `launchctl load`s it. Run unguarded on a Mac
+# this test installed a listener into the tester's own login session, pointed at
+# this throwaway HOME. The temp directory was later cleaned; the loaded job was
+# not, and went on drawing test fixtures onto a real screen for days.
+#
+# So the machine is told it is Linux for this one call. What is under test here
+# is the agent side the one-liner installs -- the workstation installer has its
+# own coverage and must never be executed by the suite.
+mkdir -p "$TMP/unamebin"
+printf '#!/bin/sh\necho Linux\n' > "$TMP/unamebin/uname"
+chmod +x "$TMP/unamebin/uname"
 HOME="$OH" TAILBELL_REPO="$REPO" TAILBELL_DIR="$OH/tailbell" \
   TAILBELL_BRANCH="$(git -C "$REPO" rev-parse HEAD)" \
+  PATH="$TMP/unamebin:$PATH" \
   bash "$REPO/packaging/get-tailbell.sh" >/dev/null 2>&1
 if [ -s "$OH/.tailbell/cluster-id" ] && [ -x "$OH/tailbell/bin/tailbell-notify" ]; then
   ok "一行安装脚本能装出一个完整的 agent 侧"
 else no "一行安装脚本没装成"; fi
+# The bug this guards: a LaunchAgent loaded into the tester's session, pointing
+# at a temp directory, outliving both the test and the directory.
+if [ -z "$(ls -A "$OH/Library/LaunchAgents" 2>/dev/null)" ]; then
+  ok "并且没有往用户会话里装 LaunchAgent"
+else no "测试装了一个 LaunchAgent —— 它会活过这次测试"; fi
 # And that what it installed actually notifies, which is the claim being made.
 s=$(sid o001)
 mkdir -p "$OH/.tailbell/state"; echo $(( $(date +%s) - 400 )) > "$OH/.tailbell/state/$s.start"
