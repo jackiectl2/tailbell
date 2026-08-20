@@ -95,9 +95,14 @@ mkdir -p "$STATE_DIR" 2>/dev/null
 # break the session. That makes silent failure the default, which is precisely
 # what made a dropped notification impossible to diagnose — so every decision is
 # recorded here instead.
+# `stat -c` is GNU; BSD/macOS spells it `stat -f %z`. The old code tried only the
+# GNU form and fell back to 0, so on a Mac neither log ever rotated — they simply
+# grew. Try both, in that order.
+file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
+
 dbg() {
   printf '%s  %-18s %s\n' "$(date '+%m-%d %H:%M:%S')" "$EVENT" "$*" >> "$DEBUG" 2>/dev/null
-  if [ "$(stat -c %s "$DEBUG" 2>/dev/null || echo 0)" -gt 262144 ]; then
+  if [ "$(file_size "$DEBUG")" -gt 262144 ]; then
     tail -n 400 "$DEBUG" > "$DEBUG.tmp" 2>/dev/null && mv "$DEBUG.tmp" "$DEBUG"
   fi
 }
@@ -218,16 +223,28 @@ sink_file() { # release 0's path: one JSON line on the shared NFS home.
   local kind="$1" title="$2" msg="$3" prio="$5"
   # jq builds the line so a quote or newline in a project name cannot produce
   # malformed JSON; flock stops concurrent sessions from interleaving writes.
-  if jq -nc --arg t "$title" --arg m "$msg" --arg p "$prio" --arg j "$proj" \
-            --arg n "$node" --arg a "$app" --arg e "$entrypoint" --arg k "$kind" \
-       '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n,
-         app:$a, entrypoint:$e, kind:$k}' \
-      | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1; then
-    dbg "EMITTED to $LOGFILE: $title"
-  else
-    dbg "FAILED writing $LOGFILE"
+  # flock serialises concurrent sessions writing the same NFS file. macOS has no
+  # flock(1) at all, so fall back to a plain append there rather than failing:
+  # a single short line under O_APPEND is atomic enough on a local filesystem,
+  # and the shared-NFS case that needs the lock is the Linux one.
+  local line
+  line="$(jq -nc --arg t "$title" --arg m "$msg" --arg p "$prio" --arg j "$proj" \
+                 --arg n "$node" --arg a "$app" --arg e "$entrypoint" --arg k "$kind" \
+            '{ts:(now|floor), title:$t, message:$m, priority:$p, project:$j, node:$n,
+              app:$a, entrypoint:$e, kind:$k}')"
+  if [ -z "$line" ]; then
+    dbg "FAILED writing $LOGFILE: jq produced nothing"
+    return 1
   fi
-  if [ "$(stat -c %s "$LOGFILE" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+  if command -v flock >/dev/null 2>&1; then
+    printf '%s\n' "$line" | flock "$LOGFILE" tee -a "$LOGFILE" >/dev/null 2>&1 \
+      && dbg "EMITTED to $LOGFILE: $title" || dbg "FAILED writing $LOGFILE"
+  else
+    printf '%s\n' "$line" >> "$LOGFILE" 2>/dev/null \
+      && dbg "EMITTED to $LOGFILE: $title (no flock on this platform)" \
+      || dbg "FAILED writing $LOGFILE"
+  fi
+  if [ "$(file_size "$LOGFILE")" -gt 1048576 ]; then
     tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE"
   fi
 }
@@ -306,6 +323,11 @@ $FEISHU_SECRET" -binary 2>/dev/null | openssl base64 2>/dev/null | tr -d '\n')"
 # Network sinks run detached unless asked not to. stdin/stdout/stderr are closed
 # first: leaving them attached would keep the pipe Claude Code reads open after
 # this script exits, so the hook would appear to hang for as long as curl does.
+#
+# The child stays in this process group — macOS has no `setsid` to escape it —
+# so a caller that killed the group after the hook returned would take the
+# in-flight POST with it. Nothing observed does that, and TAILBELL_SYNC=1 is the
+# way out if something starts to.
 run_net() {
   if [ "$SYNC" = "1" ]; then
     "$@"

@@ -1,0 +1,72 @@
+name: tests
+
+# macOS is in this matrix for one reason: everything in this repository was
+# written on a Linux cluster, and docs/MIGRATION.md records three real bugs that
+# shipped because no macOS was in reach. A runner is not a substitute for
+# testing the notification on a real screen — it cannot see a banner or hear a
+# sound — but it does run the same scripts under the same /bin/bash 3.2 and the
+# same BSD userland, which is where two of those three bugs actually lived.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the shell and interpreters actually in use
+        # Worth printing rather than assuming: macOS runners still ship bash
+        # 3.2.57, which is the version the array and `local` idioms here have to
+        # survive, and it is the one a contributor on Linux never sees.
+        run: |
+          bash --version | head -1
+          /bin/bash --version | head -1
+          /usr/bin/python3 -V
+          jq --version
+          command -v flock || echo "flock: absent (expected on macOS)"
+          command -v timeout || echo "timeout: absent (expected on macOS)"
+
+      - name: Every shell file must parse
+        # Two real syntax errors have reached commits in this repository,
+        # including a doubled here-document that parses as a truncated file.
+        run: |
+          fail=0
+          for f in $(git ls-files); do
+            case "$f" in
+              *.sh|bin/tailbell*|tests/fake-*) ;;
+              *) continue ;;
+            esac
+            head -1 "$f" | grep -q bash || continue
+            bash -n "$f" || { echo "SYNTAX ERROR: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: The listener must parse on the cluster's Python too
+        # 3.6.8 is what Great Lakes runs. `text=True` slipped in once and the
+        # failure was silent, so this is checked rather than trusted.
+        run: /usr/bin/python3 -m py_compile bin/tailbell-listen
+
+      - name: Test suite
+        # No network required, deliberately: every channel goes through
+        # tests/fake-curl and the approval round trip through a fake phone.
+        run: bash tests/run-tests.sh
+
+      - name: The suite must not have reached the network
+        # If a case ever starts making a real request, it will pass locally and
+        # fail here, which is the point.
+        run: |
+          if grep -rn 'curl -\|https://ntfy.sh\|hooks.slack.com/services/T[0-9]' tests/run-tests.sh \
+             | grep -v 'fake\|example\|T00' ; then
+            echo "a test looks like it reaches a real endpoint"
+            exit 1
+          fi
+          echo "no real endpoints referenced"

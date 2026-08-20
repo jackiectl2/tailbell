@@ -106,10 +106,22 @@ focus_active() {
     $TAILBELL_FOCUS_CMD >/dev/null 2>&1
     return $?
   fi
-  # macOS 12+: an active Focus leaves an assertion record in this plist.
-  if [ -f "$HOME/Library/DoNotDisturb/DB/Assertions.json" ]; then
-    /usr/bin/plutil -extract storeAssertionRecords raw -o - \
-      "$HOME/Library/DoNotDisturb/DB/Assertions.json" >/dev/null 2>&1 && return 0
+  # macOS 12+: an active Focus leaves an assertion record in this plist. The
+  # records live under data[0], but the shape has moved between releases, so try
+  # the nested keypath and then the bare one rather than betting on either.
+  # UNTESTED on any macOS — if it is wrong on yours, TAILBELL_FOCUS_CMD replaces
+  # the whole check rather than requiring a patch.
+  local dnd="$HOME/Library/DoNotDisturb/DB/Assertions.json"
+  if [ -f "$dnd" ]; then
+    for keypath in data.0.storeAssertionRecords storeAssertionRecords; do
+      # An empty array means "no Focus is on", and plutil prints that as `0` for
+      # `raw` on an empty list — so the presence of the key is not the answer,
+      # its contents are.
+      case "$(/usr/bin/plutil -extract "$keypath" raw -o - "$dnd" 2>/dev/null)" in
+        ""|0) ;;
+        *) return 0 ;;
+      esac
+    done
   fi
   # Before Monterey it was a single default.
   [ "$(/usr/bin/defaults -currentHost read com.apple.notificationcenterui doNotDisturb 2>/dev/null)" = "1" ] \

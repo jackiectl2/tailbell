@@ -15,6 +15,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 export TAILBELL_HOME="$TMP"
 export TAILBELL_TRANSPORT="file"
+# Pinned so the suite means the same thing on both platforms: with this unset,
+# the channel list resolves to "desktop" on macOS, and every case below would be
+# asserting against a notification banner instead of a log file. The one case
+# that must see it *unset* — the release 0 guarantee — unsets it itself.
+export TAILBELL_CHANNELS="file"
 export TAILBELL_LOG="$TMP/events.log"
 export TAILBELL_DEBUG_LOG="$TMP/debug.log"
 export TAILBELL_STATE_DIR="$TMP/state"
@@ -167,10 +172,11 @@ open('$TAILBELL_LOG','a').write('{\"ts\":0,\"title\":\"f\",\"message\":\"%s\"}\n
 with open('$TAILBELL_LOG','a') as f:
     for _ in range(12000): f.write('{\"ts\":0,\"title\":\"f\",\"message\":\"%s\"}\n' % ('x'*100))
 "
-big=$(stat -c %s "$TAILBELL_LOG")
+size_of() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
+big=$(size_of "$TAILBELL_LOG")
 s=$(sid iiii); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
 fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/p\"}"
-now=$(stat -c %s "$TAILBELL_LOG")
+now=$(size_of "$TAILBELL_LOG")
 if [ "$now" -lt "$big" ] && [ "$(lines)" -le 201 ]; then
   ok "超过 1 MB 后自动截断到最近 200 行 ($((big/1024)) KB → $((now/1024)) KB)"
 else no "轮转没生效 ($big → $now bytes, $(lines) 行)"; fi
@@ -205,13 +211,25 @@ for k in sys.argv[1].split('.'):
 print(d)" "$1" 2>/dev/null; }
 
 # --- the guarantee: an unconfigured tailbell makes no network call at all -----
-# This is release 0's path. If it ever reaches for the network, release 8 has
-# failed regardless of what else works.
+# This is release 0's path, so this case deliberately runs with TAILBELL_CHANNELS
+# genuinely unset rather than pinned. If it ever reaches for the network,
+# release 8 has failed regardless of what else works.
 reset
 s=$(sid n001); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
-b=$(lines); fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/proj-v0\"}"
-check "没配通道时仍写 events.log" "$(( $(lines) - b ))" "1"
+b=$(lines)
+( unset TAILBELL_CHANNELS
+  printf '{"session_id":"%s","cwd":"/x/proj-v0"}' "$s" | "$NOTIFY" Stop )
 check "没配通道时一个网络请求都不发" "$(calls)" "0"
+# The default itself is platform-dependent, and that IS the behaviour being
+# guaranteed: the agent host writes the log the workstation tails, and a Mac
+# draws it here because there is nothing to transport.
+if [ "$(uname)" = "Darwin" ]; then
+  check "macOS 上默认走本机渲染" "$(( $(lines) - b ))" "0"
+  if grep -q 'SHOWN' "$TAILBELL_DEBUG_LOG"; then ok "并记录为本机渲染"
+  else no "没走本机渲染"; fi
+else
+  check "没配通道时仍写 events.log" "$(( $(lines) - b ))" "1"
+fi
 
 # --- ntfy ---------------------------------------------------------------------
 reset
@@ -355,9 +373,10 @@ fire Notification "{\"session_id\":\"$(sid n020)\",\"cwd\":\"/x/p\",\"notificati
 check "权限提示的 kind 是 permission" "$(kind_of)" "permission"
 
 # Leave the environment as the rest of the suite expects it.
-unset TAILBELL_CHANNELS TAILBELL_NTFY_TOPIC TAILBELL_NTFY_SERVER \
+unset TAILBELL_NTFY_TOPIC TAILBELL_NTFY_SERVER \
       TAILBELL_SLACK_WEBHOOK TAILBELL_DISCORD_WEBHOOK TAILBELL_FEISHU_WEBHOOK \
       TAILBELL_CURL FAKE_CURL_RECORD TAILBELL_SYNC
+export TAILBELL_CHANNELS="file"
 
 ########################################################################
 echo
@@ -600,6 +619,20 @@ cat > "$TMP/events.ndjson" <<'EVJSON'
 not json at all, must not crash the stream
 EVJSON
 
+# `timeout` is GNU and macOS does not ship it (it is `gtimeout`, from coreutils,
+# if installed at all). Background, wait, kill — which works everywhere and is
+# what lets this section run on a macOS CI runner.
+run_bounded() {
+  local secs="$1"; shift
+  "$@" >/dev/null 2>&1 &
+  local pid=$!
+  local i=0
+  while [ "$i" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do sleep 1; i=$((i+1)); done
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  return 0
+}
+
 SHOWLOG="$TMP/show.log"; : > "$SHOWLOG"
 # Only in the environment of the runs below — mutating the suite's own PATH
 # would put a fake ssh in front of every later case.
@@ -608,7 +641,7 @@ HOME="$LH" TMP_SHOW_LOG="$SHOWLOG" TAILBELL_SHOW="$TMP/fake-show" \
   FAKE_SSH_EVENTS="$TMP/events.ndjson" \
   FAKE_SSH_CLUSTER_gl_login4="cluster-A" FAKE_SSH_CLUSTER_gl_login6="cluster-A" \
   PATH="$TMP/fakebin:$PATH" \
-  timeout 8 /usr/bin/python3 "$REPO/bin/tailbell-listen" >/dev/null 2>&1
+  run_bounded 8 /usr/bin/python3 "$REPO/bin/tailbell-listen"
 shown=$(grep -c '^SHOW|' "$SHOWLOG" 2>/dev/null); shown=${shown:-0}
 
 # Two identical records and one distinct one, from two hosts of the SAME cluster
@@ -636,7 +669,7 @@ else ok "非 JSON 的行被跳过,流不中断"; fi
 HOME="$LH" TMP_SHOW_LOG="$SHOWLOG" TAILBELL_SHOW="$TMP/fake-show" \
   FAKE_SSH_EVENTS="$TMP/events.ndjson" \
   PATH="$TMP/fakebin:$PATH" \
-  timeout 6 /usr/bin/python3 "$REPO/bin/tailbell-listen" >/dev/null 2>&1
+  run_bounded 6 /usr/bin/python3 "$REPO/bin/tailbell-listen"
 n=$(grep -c '^SHOW|' "$SHOWLOG" 2>/dev/null); n=${n:-0}
 check "没装 tailbell 的主机被跳过" "$n" "0"
 

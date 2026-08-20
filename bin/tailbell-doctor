@@ -32,6 +32,9 @@ ok=0; bad=0; warn=0
 # Counting a file that may not exist yet. Guard before redirecting, so a missing
 # file is 0 rather than a shell error nobody asked for.
 count_lines() { [ -f "$1" ] && wc -l < "$1" | tr -d ' ' || echo 0; }
+# `stat -c` is GNU, `stat -f` is BSD/macOS. This runs on both sides.
+file_mtime() { stat -c %y "$1" 2>/dev/null | cut -d. -f1 \
+               || stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$1" 2>/dev/null || echo '?'; }
 pass() { printf '  ✅ %s\n' "$*"; ok=$((ok+1)); }
 fail() { printf '  ❌ %s\n' "$*"; bad=$((bad+1)); }
 note() { printf '  ⚠️  %s\n' "$*"; warn=$((warn+1)); }
@@ -311,7 +314,7 @@ PYEOF
   sect "事件日志"
   if [ -f "$LOGFILE" ]; then
     n=$(count_lines "$LOGFILE")
-    pass "events.log: $n 行,最后写入 $(stat -c %y "$LOGFILE" 2>/dev/null | cut -d. -f1)"
+    pass "events.log: $n 行,最后写入 $(file_mtime "$LOGFILE")"
     [ "$n" -gt 0 ] && tail -3 "$LOGFILE" | /usr/bin/python3 -c '
 import sys, json
 for l in sys.stdin:
