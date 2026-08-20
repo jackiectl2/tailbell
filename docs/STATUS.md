@@ -70,15 +70,26 @@ Everything here needs hardware or a session this branch was written without.
    and Feishu webhooks, which need real endpoints to point at.
 4. **Nothing is published.** No git push, no tag, no brew tap, no npm publish. The
    formula is deliberately HEAD-only until a tag exists.
-5. **The GitHub account this repository points at cannot be found.** Checked
-   2026-08-19 from a login node with working GitHub access (`torvalds` resolves
-   fine): `github.com/jackiectl`, `github.com/JackyCTL` and
-   `github.com/aevum-orrin` all return 404, and so does the numeric id
-   `272573266` from the commit email. Fourteen URLs across README, package.json,
-   Formula/tailbell.rb, .claude-plugin/plugin.json and packaging/ are built from
-   that handle. **Confirm the exact spelling from the account itself before any
-   of them is trusted** — it is one `sed` once known, and nothing should be
-   pushed until it is.
+5. **The GitHub repository does not exist yet, and only a browser can create
+   it.** `origin` is set to `git@github.com:jackiectl/tailbell.git`; the repo has
+   to be made at github.com/new first — GitHub does not create one on push.
+
+   **Do not re-investigate the handle.** It is `jackiectl`, confirmed by SSH:
+   `ssh -T git@github.com` answers *"Hi jackiectl! You've successfully
+   authenticated"*. The fourteen URLs across README, package.json,
+   Formula/tailbell.rb, .claude-plugin/plugin.json and packaging/ are correct.
+
+   What will mislead you if you check it the obvious way: **the account is
+   flagged, so it is invisible to anonymous requests.** Measured 2026-08-19 —
+   `github.com/jackiectl`, `api.github.com/users/jackiectl` and a lookup by the
+   numeric id `272573266` all return 404 while `torvalds` resolves fine from the
+   same machine, and a user search returns nothing. None of that means the
+   account is gone.
+
+   The `gh` CLI cannot be used either, and not because its token is bad:
+   `gh` reports *"API rate limit already exceeded for user ID 272573266"* — the
+   flag zeroes the API quota. `git` itself is unaffected, which is why pushing to
+   the account's other repositories keeps working.
 
 ## Open — older, still true
 
