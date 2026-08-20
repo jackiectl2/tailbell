@@ -129,12 +129,30 @@ message through every channel and quotes back what the server said.
 Delivery is verified from a Great Lakes **compute node** through ARC's proxy, so
 `sbatch` jobs can reach a phone. Login nodes reach ntfy.sh directly.
 
+## Every notification I have ever received just appeared again, all at once
+
+Something replaced the remote `events.log`. The listener follows it with
+`tail -F`, which tracks the file **by name**, so a replaced file is reopened and
+read from the beginning — and every line in it arrives as a fresh alert.
+
+It is bounded: it stops when the file has been re-read. **⌥Esc clears the stack**
+if you use the Hammerspoon renderer.
+
+Do not edit or rewrite `~/.tailbell/events.log` on the agent host — not with an
+editor, not with `grep -v … > tmp && mv`. Appending is fine, and so is deleting
+it outright. tailbell's own rotation moves the old file to `events.log.1` and
+leaves an empty one precisely to avoid this, and the listener refuses events
+older than `TAILBELL_MAX_AGE` (300 s) as a second line of defence — you will see
+`dropped an event … old` in `/tmp/tailbell.err`. A flood despite that means an
+agent host running a build older than release 8.
+
 ## The phone never gets the Allow / Deny buttons
 
 Check, in this order:
 
 1. **Is it registered?** `tailbell register --approve`. Registering is separate
-   from enabling on purpose.
+   from enabling on purpose, and it refuses to run until
+   `TAILBELL_APPROVE_TOOLS` is set — that list is also the hook's matcher.
 2. **Is it on?** `TAILBELL_APPROVE=1` *and* `TAILBELL_APPROVE_TOPIC` in the config.
    Both are required.
 3. **Is it the terminal CLI?** In the chat panel there is no permission event, so
@@ -143,9 +161,12 @@ Check, in this order:
    topic equals the notification topic, and says so in `debug.log`. Anyone who can
    read a topic can answer the prompt, and your notification topic is the one that
    ends up in screenshots.
-5. **Is the tool in the list?** An empty `TAILBELL_APPROVE_TOOLS` means every
-   prompt; a non-empty one means only those, and `debug.log` names the tool it
-   skipped.
+5. **Is the tool in the list?** `TAILBELL_APPROVE_TOOLS` is required, and
+   `debug.log` names the tool it skipped. It is the hook's matcher too, so a tool
+   missing from it never reaches tailbell at all.
+6. **Is the session already auto-approving?** The hook returns immediately when
+   `permission_mode` is `acceptEdits`, `bypassPermissions`, `dontAsk`, `auto` or
+   `plan` — there is nothing to decide, and `debug.log` says so.
 
 `debug.log` records every request and every rejected reply, including *why* it was
 rejected — wrong token, wrong request, or timestamped past the deadline.

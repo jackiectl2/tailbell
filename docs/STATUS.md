@@ -44,15 +44,22 @@ wherever they touch.
 
 Everything here needs hardware or a session this branch was written without.
 
-1. **Every macOS path is unverified.** Sound per event kind, the Focus/DND check,
-   the spoken alert, and the doctor's sound self-test were all written on the
-   cluster. `docs/MIGRATION.md` records that this exact blindness shipped three
-   real bugs last time.
-2. **`PermissionRequest` has never been seen to fire for a tool permission
-   prompt.** Headless `claude -p` auto-approves and never prompts, so the hook
-   cannot be provoked without an interactive terminal CLI session. The approval
-   path is *designed* against the documented contract and *tested* against a fake
-   phone; it is not yet known to work against the real event.
+1. **Most macOS paths are unverified.** Sound per event kind, the Focus/DND
+   check, the spoken alert, and the doctor's sound self-test were all written on
+   the cluster. `docs/MIGRATION.md` records that this exact blindness shipped
+   three real bugs last time.
+   *Verified incidentally on 2026-08-19:* the live chain does work — an event
+   raised on `gl-login4` reached the Mac and rendered as a centered Hammerspoon
+   overlay, and ⌥Esc bulk clear was exercised for the first time. Two things to
+   look at when next on that machine: the message line appeared **truncated**
+   (`… · gl-` cut off), and stacked alerts overlapped each other and the text
+   behind them.
+2. **Approval is verified against a real session — except the phone itself.**
+   Driving a terminal CLI session inside a pty showed that `PermissionRequest`'s
+   decision is ignored and `PreToolUse`'s is applied; the path was moved and then
+   verified end to end (request pushed, button pressed, decision applied, no
+   prompt drawn). What remains untested is the literal last hop: a real ntfy app
+   rendering the action buttons and posting back.
 3. **No channel has been delivered to a real phone.** Half of this is now done:
    a Slurm job on `gl3009` published to ntfy through ARC's proxy and the message
    came back off the topic intact (architecture.md §7). What is untested is the
@@ -63,7 +70,7 @@ Everything here needs hardware or a session this branch was written without.
 
 ## Open — older, still true
 
-- **Never exercised, still:** ⌥Esc bulk clear · `StopFailure` · `Elicitation` ·
+- **Never exercised, still:** `StopFailure` · `Elicitation` ·
   permission prompts in the terminal CLI · alert stack compression · click-to-focus
   for anything other than VS Code.
 - The prototype this grew out of still sits in `~/.claude/hooks/` (`cc-notify.sh`,

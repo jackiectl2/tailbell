@@ -82,8 +82,13 @@ TAILBELL_MIN_SECONDS=60
 #
 # Register the hook with:  tailbell-register --approve
 # Then turn it on here. Both steps are needed, deliberately: this hook holds the
-# prompt for up to TTL seconds while it waits for you, which is what you want
+# tool call for up to TTL seconds while it waits for you, which is what you want
 # when you are away from the keyboard and not what you want when you are at it.
+#
+# TAILBELL_APPROVE_TOOLS is REQUIRED and doubles as the hook's matcher. The hook
+# runs before every matching tool call, not only the ones that would have
+# prompted, so an empty list means a phone push hundreds of times a session —
+# tailbell-register refuses without it.
 #
 # THE APPROVAL TOPIC MUST NOT BE THE NOTIFICATION TOPIC. Anyone who can read the
 # topic can answer the prompt, and your notification topic is the one that ends
@@ -92,7 +97,7 @@ TAILBELL_MIN_SECONDS=60
 #TAILBELL_APPROVE_TOPIC=""        # a SECOND, long random topic, not the one above
 #TAILBELL_APPROVE_TOKEN=""        # ntfy auth token — strongly recommended here
 #TAILBELL_APPROVE_TTL=90
-#TAILBELL_APPROVE_TOOLS=""        # e.g. "Bash,Write" — empty means every prompt
+#TAILBELL_APPROVE_TOOLS="Bash,Write"   # required; also the hook matcher
 EOF
   chmod 600 "$TB/config"
   echo "    写入 $TB/config"

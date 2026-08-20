@@ -1,20 +1,43 @@
 #!/usr/bin/env bash
 # tailbell-approve — answer a Claude Code permission prompt from your phone.
 #
-# Registered as the `PermissionRequest` hook. Claude Code runs that hook *before*
-# showing the prompt, and honours a decision printed on stdout, so this can hold
-# the prompt for a moment, ask a phone, and answer on the user's behalf.
+# Registered as a `PreToolUse` hook with a matcher you choose. It holds the tool
+# call for a moment, pushes two buttons to a phone, and prints the decision that
+# Claude Code then applies instead of prompting you.
 #
 #   tailbell-approve            with the hook JSON on stdin
 #
 # ---------------------------------------------------------------------------
+# Why PreToolUse and not PermissionRequest
+#
+# `PermissionRequest` is the obvious hook — it is documented as running "before
+# permission prompt" and the runtime carries strings about it allowing and
+# denying. It was the first implementation, and it does not work. Measured on
+# 2.1.160 by driving a real terminal CLI session inside a pty:
+#
+#   PermissionRequest   fires, with the real tool_name and tool_input, before
+#                       the prompt — and the decision a *command* hook prints is
+#                       ignored. allow and deny, four output shapes, all four
+#                       showed the prompt anyway. (`type: prompt` and
+#                       `type: agent` hooks are documented as available on this
+#                       event; a command hook's verdict appears not to be.)
+#   PreToolUse          fires, and its decision IS applied: the write happened
+#                       and no prompt was ever drawn.
+#
+# The cost of that, stated plainly: PreToolUse fires for **every** matching tool
+# call, including ones your allowlist would have approved silently. That is why
+# TAILBELL_APPROVE_TOOLS is required rather than defaulting to everything —
+# without a matcher this would push to your phone hundreds of times a session.
+# Name the few tools you actually get asked about.
+#
+# ---------------------------------------------------------------------------
 # Which frontends this covers
 #
-# The terminal CLI. In the VS Code chat panel `PermissionRequest` fires only for
-# AskUserQuestion — 16 fires measured over two weeks, not one of them a tool
-# permission prompt — because the extension passes --permission-prompt-tool stdio
-# and handles the UI itself (upstream #80110). There is no event to hook there.
-# docs/architecture.md §1 has the measurement; do not spend time on it again.
+# The terminal CLI. In the VS Code chat panel the permission UI is handled by the
+# extension itself (upstream #80110) — `PermissionRequest` fires there only for
+# AskUserQuestion, 16 fires measured over two weeks, not one of them a tool
+# permission prompt. docs/architecture.md §1 has the measurement; do not spend
+# time on it again.
 #
 # ---------------------------------------------------------------------------
 # Why there is no inbound port
@@ -57,7 +80,7 @@
 # somebody else's server.
 set -u
 
-EVENT="PermissionRequest"
+EVENT="PreToolUse"
 
 TAILBELL_HOME="${TAILBELL_HOME:-$HOME/.tailbell}"
 [ -f "$TAILBELL_HOME/config" ] && . "$TAILBELL_HOME/config"
@@ -74,7 +97,9 @@ TOKEN="${TAILBELL_APPROVE_TOKEN:-${TAILBELL_NTFY_TOKEN:-}}"
 # configured timeout, so tailbell-register writes one comfortably larger.
 TTL="${TAILBELL_APPROVE_TTL:-90}"
 POLL="${TAILBELL_APPROVE_POLL:-3}"
-# Comma-separated tool names. Empty means every tool that would prompt.
+# Comma-separated tool names. REQUIRED: this hook runs before every matching
+# tool call, not only the ones that would have prompted, so an empty value would
+# mean asking your phone about all 787 of them.
 TOOLS="${TAILBELL_APPROVE_TOOLS:-}"
 
 CURL="${TAILBELL_CURL:-curl}"
@@ -104,11 +129,10 @@ proj="${cwd##*/}"; [ -n "$proj" ] || proj="claude"
 short="${sid:0:4}"
 node="$(hostname -s 2>/dev/null || echo '?')"
 
-# In the chat panel this hook fires for AskUserQuestion and nothing else, and
-# PreToolUse:AskUserQuestion has already notified for exactly that. Answering a
-# multiple-choice question is also not a thing two buttons can do.
+# tailbell already notifies for AskUserQuestion through its own PreToolUse hook,
+# and answering a multiple-choice question is not something two buttons can do.
 if [ "$tool" = "AskUserQuestion" ]; then
-  dbg "ignored: AskUserQuestion is not a permission decision (PreToolUse already notified)"
+  dbg "ignored: AskUserQuestion is not a permission decision (already notified separately)"
   exit 0
 fi
 
@@ -127,12 +151,25 @@ if [ -n "${TAILBELL_NTFY_TOPIC:-}" ] && [ "$TOPIC" = "${TAILBELL_NTFY_TOPIC:-}" 
   dbg "ABORT: approval topic is the same as the notification topic — anyone who can read your pings could approve. Use a separate topic."
   exit 0
 fi
-if [ -n "$TOOLS" ]; then
-  case ",$TOOLS," in
-    *",$tool,"*) ;;
-    *) dbg "not in TAILBELL_APPROVE_TOOLS: $tool — falling through to the local prompt"; exit 0 ;;
-  esac
+# Required, not optional: see the header. A missing list is a configuration
+# error, and the safe reading of it is "ask about nothing".
+if [ -z "$TOOLS" ]; then
+  dbg "ABORT: TAILBELL_APPROVE=1 but TAILBELL_APPROVE_TOOLS is empty — refusing to ask about every tool call"
+  exit 0
 fi
+case ",$TOOLS," in
+  *",$tool,"*) ;;
+  *) dbg "not in TAILBELL_APPROVE_TOOLS: $tool — falling through to the local prompt"; exit 0 ;;
+esac
+
+# A mode that is already auto-approving does not need a phone, and asking anyway
+# would add a delay to work the user explicitly told Claude Code to just do.
+mode="$(get .permission_mode)"
+case "$mode" in
+  bypassPermissions|acceptEdits|dontAsk|auto|plan)
+    dbg "permission_mode=$mode already decides this — not asking the phone"
+    exit 0 ;;
+esac
 
 # /dev/urandom rather than $RANDOM, which is 15 bits of a seeded PRNG and would
 # make the token guessable — the token is the only thing standing between a
@@ -189,9 +226,12 @@ case "$pub_code" in
       exit 0 ;;
 esac
 
+# The hookEventName must be the event this hook is registered on. Getting it
+# wrong is silent: Claude Code reads the JSON, finds nothing addressed to the
+# event it just ran, and shows the prompt as if the hook had said nothing.
 decide() {   # decide <allow|deny>
   jq -nc --arg d "$1" --arg r "$req" --arg t "$tool" \
-    '{hookSpecificOutput:{hookEventName:"PermissionRequest",
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",
                           permissionDecision:$d,
                           permissionDecisionReason:("tailbell: " + $d + " from phone (req " + $r + ", tool " + $t + ")")}}'
 }

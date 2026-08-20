@@ -70,17 +70,6 @@
           }
         ]
       }
-    ],
-    "PermissionRequest": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/tailbell-approve",
-            "timeout": 120
-          }
-        ]
-      }
     ]
   }
 }

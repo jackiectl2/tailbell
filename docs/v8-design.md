@@ -295,6 +295,22 @@ the design as built can be compared.
 The pattern in the last three is the same one `docs/MIGRATION.md` is about, and it
 is why the CI job exists now rather than in release 7.
 
+**Two things the design got wrong, found by testing against a real session:**
+
+- **The approval hook was on the wrong event.** `PermissionRequest` fires, but a
+  command hook's decision is ignored there — verified in both directions, across
+  four output shapes, by driving a terminal CLI session inside a pty. It is
+  registered on `PreToolUse` now, which does apply the decision; the round trip
+  is verified end to end against a real session. The cost is that `PreToolUse`
+  fires before every matching tool call, which is why `TAILBELL_APPROVE_TOOLS`
+  became required and doubles as the matcher.
+- **Log rotation replayed history.** `tail -n 200 log > tmp && mv tmp log` looks
+  harmless and is a notification storm: the listener follows by name, so a
+  replaced file is re-read from the start. Found by doing it by hand on a live
+  system and watching days of alerts stack up on the user's screen. Rotation now
+  moves the old file aside and leaves an empty one, and the listener drops
+  anything older than `TAILBELL_MAX_AGE`.
+
 **Changed from the design:**
 
 - The Focus check tries `data.0.storeAssertionRecords` *and* the bare key, and

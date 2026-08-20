@@ -182,11 +182,20 @@ tailbell register --approve
 TAILBELL_APPROVE=1
 TAILBELL_APPROVE_TOPIC="a SECOND long random string, not the one above"
 TAILBELL_APPROVE_TOKEN="an ntfy auth token"     # strongly recommended
-TAILBELL_APPROVE_TOOLS="Bash,Write"             # empty means every prompt
+TAILBELL_APPROVE_TOOLS="Bash,Write"             # REQUIRED — see below
 ```
 
 **Terminal CLI only.** In the chat panel there is no permission event to hook —
 that is the measurement in the table above, not a missing feature.
+
+**`TAILBELL_APPROVE_TOOLS` is required, and it is not a filter — it is the
+matcher.** The hook that can actually decide is `PreToolUse`, and that runs before
+*every* matching tool call, not only the ones that would have prompted you. Name
+the two or three tools you actually get asked about; leaving it empty would mean
+a push to your phone hundreds of times a session, so `tailbell register --approve`
+refuses to run without it. (`PermissionRequest` looks like the right hook and is
+not: measured on 2.1.160, a command hook's decision there is ignored in both
+directions. [architecture.md §7](docs/architecture.md) has the table.)
 
 Read this before enabling it:
 
@@ -204,9 +213,12 @@ Read this before enabling it:
 - **Silence is never approval.** A timeout, a wrong token, a late reply and a
   reply for another request all produce no decision at all, and Claude Code
   shows its normal prompt.
-- **It holds the prompt while it waits.** That is what you want when you are away
-  and not what you want when you are at the keyboard, which is why it is off by
-  default and why `TAILBELL_APPROVE_TOOLS` exists.
+- **It holds the tool call while it waits.** That is what you want when you are
+  away and not what you want when you are at the keyboard, which is why it is off
+  by default. It returns immediately when the session is already in a mode that
+  auto-approves.
+- **The plugin cannot ship this.** `hooks/hooks.json` is static and cannot know
+  your matcher, so approval always needs `tailbell register --approve`.
 
 ## Two things tailbell deliberately does not do
 
@@ -252,7 +264,8 @@ with all of this commented and explained.
 | `TAILBELL_DISCORD_WEBHOOK` | — | the Discord channel |
 | `TAILBELL_FEISHU_WEBHOOK` / `_SECRET` | — | the Feishu channel; secret only for signed bots |
 | `TAILBELL_HTTP_PROXY` / `_TIMEOUT` | — / `8` | only to override a preset proxy |
-| `TAILBELL_APPROVE` / `_TOPIC` / `_TOKEN` / `_TTL` / `_TOOLS` | `0` / — / — / `90` / all | phone approval |
+| `TAILBELL_APPROVE` / `_TOPIC` / `_TOKEN` / `_TTL` / `_TOOLS` | `0` / — / — / `90` / **required** | phone approval |
+| `TAILBELL_MAX_AGE` | `300` | listener drops events older than this, so a replaced remote log cannot replay |
 | `TAILBELL_SOUND` | `1` | `0` silences every sound |
 | `TAILBELL_SOUND_DONE` / `_QUESTION` / `_PERMISSION` / `_ERROR` / `_IDLE` | `Glass` / `Ping` / `Sosumi` / `Basso` / `Tink` | per-kind sounds |
 | `TAILBELL_VOICE` / `_NAME` | `0` / — | `1`, or a list of kinds, e.g. `question,permission` |
@@ -266,7 +279,7 @@ with all of this commented and explained.
 bash tests/run-tests.sh
 ```
 
-116 cases, no side effects, and **no network** — every channel is exercised
+126 cases, no side effects, and **no network** — every channel is exercised
 through a recorded fake `curl`, and the approval round trip through a fake phone
 that presses the button on whatever was just pushed. Every case corresponds to
 something that actually broke, so the suite doubles as the regression record.

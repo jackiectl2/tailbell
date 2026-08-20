@@ -177,9 +177,20 @@ big=$(size_of "$TAILBELL_LOG")
 s=$(sid iiii); echo $(( $(date +%s) - 400 )) > "$TAILBELL_STATE_DIR/$s.start"
 fire Stop "{\"session_id\":\"$s\",\"cwd\":\"/x/p\"}"
 now=$(size_of "$TAILBELL_LOG")
-if [ "$now" -lt "$big" ] && [ "$(lines)" -le 201 ]; then
-  ok "超过 1 MB 后自动截断到最近 200 行 ($((big/1024)) KB → $((now/1024)) KB)"
-else no "轮转没生效 ($big → $now bytes, $(lines) 行)"; fi
+if [ "$now" -lt "$big" ]; then
+  ok "超过 1 MB 后轮转 ($((big/1024)) KB → $((now/1024)) KB)"
+else no "轮转没生效 ($big → $now bytes)"; fi
+
+# Rotation must not REPLACE the log with a shorter version of itself. The
+# workstation follows it with `tail -F`, which tracks by name: a replaced file is
+# reopened and read from the start, so every retained line is delivered again as
+# a fresh alert. That was the old `tail -n 200 > tmp && mv tmp log`, and it is a
+# 200-notification storm on every rotation. Reproduced by accident against a live
+# listener, which is how it was found.
+if [ "$(lines)" -le 1 ]; then ok "轮转后是一个全新的空文件,不会被 tail -F 重播"
+else no "轮转后文件里还有 $(lines) 行 —— 监听器会把它们当新事件重播一遍"; fi
+if [ -s "$TAILBELL_LOG.1" ]; then ok "旧日志留在 .1 里,排查时还查得到"
+else no "旧日志直接丢了"; fi
 
 ########################################################################
 echo
@@ -498,9 +509,14 @@ verdict() { printf '%s' "$1" | /usr/bin/python3 -c '
 import sys, json
 t = sys.stdin.read().strip()
 print(json.loads(t)["hookSpecificOutput"]["permissionDecision"] if t else "")' 2>/dev/null; }
+event_name() { printf '%s' "$1" | /usr/bin/python3 -c '
+import sys, json
+t = sys.stdin.read().strip()
+print(json.loads(t)["hookSpecificOutput"]["hookEventName"] if t else "")' 2>/dev/null; }
 
 approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"' \
-            'TAILBELL_NTFY_TOPIC="tb-notify-public"'
+            'TAILBELL_NTFY_TOPIC="tb-notify-public"' \
+            'TAILBELL_APPROVE_TOOLS="Bash,Write"'
 
 check "手机点「允许」→ allow" "$(verdict "$(ask allow)")" "allow"
 check "手机点「拒绝」→ deny"  "$(verdict "$(ask deny)")"  "deny"
@@ -548,24 +564,61 @@ approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"'
 if [ -s "$AH/curl.log" ]; then no "AskUserQuestion 也去要审批了 (会重复通知)"
 else ok "AskUserQuestion 不走审批,避免重复通知"; fi
 
-# Narrowing to specific tools is how you avoid holding up every prompt.
+# Narrowing to specific tools is how you avoid holding up every tool call.
 approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"' \
             'TAILBELL_APPROVE_TOOLS="Write,Edit"'
 check "不在 TAILBELL_APPROVE_TOOLS 里的工具不介入" "$(verdict "$(ask allow Bash)")" ""
 check "在清单里的工具照常介入" "$(verdict "$(ask allow Write)")" "allow"
 
+# The decision is applied on PreToolUse and ignored on PermissionRequest —
+# measured on 2.1.160 by driving a real terminal CLI session. Getting the event
+# name wrong fails silently: Claude Code reads the JSON, finds nothing addressed
+# to the event it ran, and prompts as if the hook had said nothing.
+check "决定挂的是 PreToolUse 这个事件名" "$(event_name "$(ask allow Write)")" "PreToolUse"
+
+# This hook runs before EVERY matching tool call, not only the ones that would
+# have prompted. With no list, that is a phone push per tool call.
+approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"'
+check "没列工具时拒绝工作,而不是对所有工具发问" "$(verdict "$(ask allow Write)")" ""
+if grep -q 'TAILBELL_APPROVE_TOOLS is empty' "$TAILBELL_DEBUG_LOG"; then ok "并说明为什么拒绝"
+else no "拒绝了但没说原因"; fi
+
+# A mode that already auto-approves does not need a phone, and asking anyway
+# would delay work the user explicitly told Claude Code to just get on with.
+approve_cfg 'TAILBELL_APPROVE=1' 'TAILBELL_APPROVE_TOPIC="tb-approve-secret"' \
+            'TAILBELL_APPROVE_TOOLS="Write"'
+: > "$AH/curl.log"
+printf '{"session_id":"abcd1234-0000-0000-0000-000000000000","cwd":"/x/demo","tool_name":"Write","permission_mode":"acceptEdits"}' \
+  | FAKE_CURL_RECORD="$AH/curl.log" TAILBELL_HOME="$AH" bash "$APPROVER" >/dev/null 2>&1
+if [ -s "$AH/curl.log" ]; then no "permission_mode=acceptEdits 时还去问手机"
+else ok "已在自动放行的模式下不打扰手机"; fi
+
 # The registered hook timeout has to follow the configured TTL. Claude Code
 # kills a hook at its timeout, and a killed hook is a decision that never
 # arrives — which looks exactly like nobody answering.
 RH="$TMP/reghome"; mkdir -p "$RH/.tailbell"
-printf 'TAILBELL_APPROVE_TTL=300\n' > "$RH/.tailbell/config"
+printf 'TAILBELL_APPROVE_TTL=300\nTAILBELL_APPROVE_TOOLS="Bash,Write"\n' > "$RH/.tailbell/config"
 HOME="$RH" TAILBELL_HOME="$RH/.tailbell" \
   bash "$REPO/bin/tailbell-register" --approve "$REPO/bin/tailbell-notify" >/dev/null 2>&1
 check "hook 超时跟随配置里的 TTL" \
   "$(/usr/bin/python3 -c "
 import json
-h = json.load(open('$RH/.claude/settings.json'))['hooks']['PermissionRequest']
-print(h[0]['hooks'][0].get('timeout'))" 2>/dev/null)" "330"
+h = json.load(open('$RH/.claude/settings.json'))['hooks']['PreToolUse']
+e = [x for x in h if 'tailbell-approve' in str(x)][0]
+print(e['hooks'][0].get('timeout'))" 2>/dev/null)" "330"
+check "matcher 就是配置里的工具清单" \
+  "$(/usr/bin/python3 -c "
+import json
+h = json.load(open('$RH/.claude/settings.json'))['hooks']['PreToolUse']
+e = [x for x in h if 'tailbell-approve' in str(x)][0]
+print(e.get('matcher'))" 2>/dev/null)" "Bash|Write"
+# The AskUserQuestion notifier and the approver are two PreToolUse entries and
+# must not overwrite each other — they match different tools.
+check "AskUserQuestion 那条 hook 没有被覆盖掉" \
+  "$(/usr/bin/python3 -c "
+import json
+h = json.load(open('$RH/.claude/settings.json'))['hooks']['PreToolUse']
+print(len([x for x in h if 'tailbell-notify' in str(x)]))" 2>/dev/null)" "1"
 
 # A hook that writes anything else to stdout turns a decision into plain text —
 # Claude Code parses this, and "does not start with {" means it is ignored.
@@ -648,10 +701,15 @@ printf 'SHOW|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$TMP
 FSHOW
 chmod +x "$TMP/fake-show"
 
-cat > "$TMP/events.ndjson" <<'EVJSON'
-{"ts":1000,"title":"✅ p · 完成","message":"跑了 5m","priority":"default","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"done"}
-{"ts":1000,"title":"✅ p · 完成","message":"跑了 5m","priority":"default","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"done"}
-{"ts":1001,"title":"❓ p · 在等你回答","message":"问题","priority":"high","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"question"}
+# Current timestamps, not fixed ones: the listener now refuses anything older
+# than TAILBELL_MAX_AGE, which is the guard against a replaced log being
+# replayed. The two identical records are the duplicate-suppression case, so
+# they have to share a timestamp.
+NOW=$(date +%s)
+cat > "$TMP/events.ndjson" <<EVJSON
+{"ts":$NOW,"title":"✅ p · 完成","message":"跑了 5m","priority":"default","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"done"}
+{"ts":$NOW,"title":"✅ p · 完成","message":"跑了 5m","priority":"default","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"done"}
+{"ts":$((NOW+1)),"title":"❓ p · 在等你回答","message":"问题","priority":"high","project":"p","node":"gl3009","app":"","entrypoint":"claude-vscode","kind":"question"}
 not json at all, must not crash the stream
 EVJSON
 
@@ -698,6 +756,25 @@ else no "high 优先级没映射成 urgent"; fi
 # A truncated or interleaved line on a shared NFS file must not end the stream.
 if grep -q 'not json' "$SHOWLOG"; then no "非 JSON 的行被当成事件了"
 else ok "非 JSON 的行被跳过,流不中断"; fi
+
+# The other half of the same bug: even with a fixed sender, anything that
+# replaces the remote file makes `tail -F` reopen it and read from the start. The
+# listener must refuse to announce something that already happened, because the
+# sender is on another machine and may be an older version.
+: > "$SHOWLOG"
+cat > "$TMP/stale.ndjson" <<STALEJSON
+{"ts":1,"title":"很久以前的事","message":"m","priority":"default","project":"p","node":"n","kind":"done"}
+{"ts":$(date +%s),"title":"刚刚的事","message":"m","priority":"default","project":"p","node":"n","kind":"done"}
+STALEJSON
+HOME="$LH" TMP_SHOW_LOG="$SHOWLOG" TAILBELL_SHOW="$TMP/fake-show" \
+  FAKE_SSH_EVENTS="$TMP/stale.ndjson" \
+  FAKE_SSH_CLUSTER_gl_login4="cluster-A" FAKE_SSH_CLUSTER_gl_login6="cluster-A" \
+  PATH="$TMP/fakebin:$PATH" \
+  run_bounded 8 /usr/bin/python3 "$REPO/bin/tailbell-listen"
+if grep -q '很久以前的事' "$SHOWLOG"; then no "陈旧事件被当成新通知弹出来了 (日志被替换就会刷屏)"
+else ok "陈旧事件被丢弃,不会刷屏"; fi
+if grep -q '刚刚的事' "$SHOWLOG"; then ok "同一批里的新事件照常通知"
+else no "把新事件也一起丢了"; fi
 
 # A host where tailbell was never installed has no cluster-id. Tailing it would
 # create state there and stream nothing, so it must be skipped entirely.

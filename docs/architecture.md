@@ -225,6 +225,44 @@ and the compute node found nothing there, silently fell back to defaults, and
 sent through the file sink only. `$HOME` is the shared mount; `/tmp` is not. That
 is the same fact §3 relies on, seen from the other side.
 
+### Which hook can actually decide — measured, after getting it wrong
+
+`PermissionRequest` is the obvious hook for phone approval: the bundled reference
+calls it *"Run before permission prompt"*, and the runtime carries the strings
+`Permission denied by PermissionRequest hook` and `PermissionRequest hook allowed
+… with updatedInput`. tailbell was built on it. **It does not work.**
+
+Measured 2026-08-19 on `2.1.160` by driving a real terminal CLI session inside a
+pty — headless `claude -p` auto-approves and never prompts, so it cannot produce
+the event at all, which is why this went untested for so long.
+
+| hook | fires in the terminal CLI | is a *command* hook's decision applied |
+| --- | --- | --- |
+| `PermissionRequest` | ✅ with the real `tool_name` and `tool_input`, before the prompt | ❌ **no** — `allow` and `deny`, four output shapes, prompt shown every time |
+| `PreToolUse` (with a matcher) | ✅ | ✅ **yes** — the write happened and no prompt was ever drawn |
+
+The four shapes tried on `PermissionRequest`, all ignored:
+`hookSpecificOutput` with `hookEventName` of `PermissionRequest` or `PreToolUse`;
+top-level `decision: "approve"`; top-level `permissionDecision: "allow"`. Denies
+were ignored too, so this is not a "hooks may tighten but not loosen" rule. The
+bundled docs note that `type: "prompt"` and `type: "agent"` hooks are available on
+`PermissionRequest`; a `type: "command"` hook's verdict appears not to be.
+
+So the approval path is registered on **`PreToolUse`**, and the whole round trip
+was then verified against a real session: request pushed, button pressed, decision
+applied, file written, no prompt.
+
+**The cost, stated because it is the reason for a required setting.** `PreToolUse`
+runs before *every* matching tool call, not only the ones that would have
+prompted. With no matcher that is hundreds of phone pushes a session. So
+`TAILBELL_APPROVE_TOOLS` is required — `tailbell-register --approve` refuses
+without it — and it doubles as the hook's matcher. The hook also returns
+immediately when `permission_mode` is already auto-approving.
+
+One consequence for the plugin: `hooks/hooks.json` cannot ship this, because a
+static file cannot know your matcher and a matcher-less entry would fire on all
+~787 tool calls. Approval requires `tailbell-register --approve`.
+
 ### Why answering from a phone needs nothing listening on the agent host
 
 The obvious design is an inbound channel: hold a port, let the phone reach it.
@@ -250,6 +288,30 @@ timestamp the message itself carries; and no answer never becomes yes.
 `$RANDOM` is 15 bits from a seeded PRNG. It is the only thing standing between
 someone on the topic and an approved command, so it is not a place to save a
 subprocess.
+
+### Why log rotation must not rewrite the log
+
+Rotation was `tail -n 200 log > tmp && mv tmp log`. That is a notification storm,
+and it took an accident to see it.
+
+The workstation follows the file with `tail -F`, which tracks it **by name**.
+Replacing the file makes tail reopen it and read **from the beginning** — so all
+200 retained lines are delivered again as fresh alerts. The listener's duplicate
+suppression is a 120-second window and does not touch events that old.
+
+Observed live: rewriting `~/.tailbell/events.log` by hand replayed the entire
+history to a connected listener, dozens of stacked alerts for turns that had
+finished days earlier. Reproduced deterministically afterwards — with `tail -F`
+watching, a `mv`-replacement re-delivered lines it had already emitted.
+
+Two fixes, because one of them lives on the wrong machine to be trusted:
+
+1. Rotation moves the old file aside and leaves a fresh **empty** one. tail still
+   reopens by name and still reads from the start, and finds nothing. Truncating
+   in place has the same replay problem for the same reason.
+2. The listener refuses any record whose `ts` is more than `TAILBELL_MAX_AGE`
+   (300 s) old, and says so on stderr. The sender is on another machine and may
+   be an older version, so the receiver does not get to assume it was fixed.
 
 ### Why network sinks are backgrounded
 

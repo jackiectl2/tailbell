@@ -249,8 +249,25 @@ sink_file() { # release 0's path: one JSON line on the shared NFS home.
     if [ "$wrote" = 1 ]; then dbg "EMITTED to $LOGFILE: $title (no flock on this platform)"
     else dbg "FAILED writing $LOGFILE"; fi
   fi
+  # Rotation must never re-present old events.
+  #
+  # This used to be `tail -n 200 log > tmp && mv tmp log`, and that is a
+  # notification storm. The workstation follows this file with `tail -F`, which
+  # tracks it BY NAME: replacing the file makes tail reopen it and read from the
+  # beginning, so every one of those 200 retained lines is delivered again. The
+  # listener's duplicate suppression is a 120 s window and does not touch events
+  # that old. Reproduced deliberately — a replaced file replayed the whole
+  # history to a live listener.
+  #
+  # So: move the old file aside and leave a fresh EMPTY one in its place. tail
+  # still reopens by name, still reads from the start, and finds nothing there.
+  # History is kept in .1 for anyone debugging, and truncating in place would
+  # have the same replay problem for the same reason.
   if [ "$(file_size "$LOGFILE")" -gt 1048576 ]; then
-    tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE"
+    if mv -f "$LOGFILE" "$LOGFILE.1" 2>/dev/null; then
+      : > "$LOGFILE" 2>/dev/null
+      dbg "rotated $LOGFILE (old copy kept as $LOGFILE.1)"
+    fi
   fi
 }
 

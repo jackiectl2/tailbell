@@ -25,6 +25,13 @@ Several obvious-looking "improvements" are already ruled out there with evidence
   your notifications to a stranger's machine.
 - Do **not** read `last_assistant_message` from the `Stop` payload. It is the whole
   reply text; emitting it would leak the conversation.
+- Do **not** hook `PermissionRequest` to *decide* anything. It fires, but a
+  command hook's verdict is ignored there — measured, both directions, four
+  output shapes. `PreToolUse` is the one whose decision is applied.
+- Do **not** rotate `events.log` by rewriting it. The workstation follows it with
+  `tail -F`, which tracks by name, so a replaced file is re-read from the start
+  and every retained line is delivered again. Move the old file aside and leave a
+  fresh empty one.
 - Do **not** treat a missing start marker as `elapsed = 0`. That silently dropped
   notifications and is the bug `tests/run-tests.sh` guards against.
 - Do **not** read `PermissionRequest`'s `tool_input` either. For `AskUserQuestion`
@@ -100,7 +107,7 @@ third-party component load-bearing on the v0 path, that is a regression.
 ## Verify
 
 ```bash
-bash tests/run-tests.sh          # 116 cases, no side effects, no network
+bash tests/run-tests.sh          # 126 cases, no side effects, no network
 bin/tailbell-doctor --test       # end to end, every channel; run on BOTH sides
 claude plugin validate .         # manifest and hook schema
 bash -n <every shell file>       # two real syntax errors have shipped this way
